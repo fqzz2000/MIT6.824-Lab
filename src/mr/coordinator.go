@@ -13,12 +13,25 @@ import (
 	"github.com/google/uuid"
 )
 
-
+// worker status
 const (
 	idle int = iota
 	working
 	loseConnection
 )
+
+// task status
+const (
+	unstarted int = iota
+	pending
+	complete
+)
+
+type MapTaskStatus struct {
+	status int
+	intermediateFilePath string
+}
+
 type WorkerStatus struct {
 	lastHeartBeat time.Time
 	status int
@@ -31,6 +44,11 @@ type Coordinator struct {
 	worker_status map[string]WorkerStatus
 	// worker status lock
 	worker_status_lock sync.Mutex
+
+	// map task status
+	map_task_status map[int]MapTaskStatus
+	// map task status lock
+	map_task_status_lock sync.Mutex
 	// idle map task queue
 	// test implementation
 	test_queue []MrTask
@@ -125,10 +143,14 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 func (c *Coordinator) WorkerHeartBeat(args *HeartBeatArgs, reply *EmptyArgs) error {
 	// update worker status
-	c.worker_status_lock.Lock()
-	c.worker_status[args.WorkerId] = WorkerStatus{lastHeartBeat: time.Now(), status: args.Status}
-	c.worker_status_lock.Unlock()
+	c.recordHeartBeat(args.WorkerId, time.Now(), args.Status)
 	return nil
+}
+
+func (c *Coordinator) recordHeartBeat(WorkerId string, timestamp time.Time, status int) {
+	c.worker_status_lock.Lock()
+	c.worker_status[WorkerId] = WorkerStatus{lastHeartBeat: timestamp, status: status}
+	c.worker_status_lock.Unlock()
 }
 
 func (c *Coordinator) healthCheck() {
@@ -154,6 +176,22 @@ func (c *Coordinator) healthCheck() {
 			break
 		}
 	}
+}
 
+// RPC handler for worker to send map complete message to coordinator
+func (c *Coordinator) ReportMapComplete(args *MapCompleteArgs, reply *EmptyArgs) error {
+	c.map_task_status_lock.Lock()
+	c.map_task_status[args.MapId] = MapTaskStatus{status: complete, intermediateFilePath: args.IFilePath}
+	c.map_task_status_lock.Unlock()
+	
+	// update worker status
+	c.recordHeartBeat(args.WorkerId, time.Now(), idle)
+	return nil
+}
+
+// RPC handler for worker to send reduce complete message to coordinator
+func (c *Coordinator) ReportReduceComplete(args *ReduceCompleteArgs, reply *EmptyArgs) error {
+	// to be implemented
+	return nil
 }
 

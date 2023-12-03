@@ -32,6 +32,19 @@ type HeartBeatArgs struct {
 	Status int
 }
 
+// RPC arguments for worker to send map complete message to coordinator
+type MapCompleteArgs struct {
+	WorkerId string
+	MapId int
+	IFilePath string
+}
+
+// RPC arguments for worker to send reduce complete message to coordinator
+type ReduceCompleteArgs struct {
+	WorkerId string
+	ReduceId int
+	OFilePath string
+}
 
 type RegisterArgs struct {
 }

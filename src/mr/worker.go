@@ -82,7 +82,10 @@ func Worker(mapf func(string, string) []KeyValue,
 				// write kva to intermediate file
 				// temporary implementation for testing
 				storeMapResult(kva, task.MapId, task.ReduceId)
-
+				instance.status.Store(int32(idle))
+				// send map complete message to coordinator
+				ReportMapComplete(instance.workerId, task.MapId, task.FilePath)
+			
 			case Reduce_t:
 				// do reduce
 				// call reducef
@@ -104,6 +107,18 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 
 }
+
+// RPC handler for worker to send map complete message to coordinator
+func  ReportMapComplete(workerId string, mapid int, intermediaFilePath string) error {
+	
+	args := MapCompleteArgs{WorkerId: workerId, MapId: mapid, IFilePath: intermediaFilePath}
+	ok := call("Coordinator.ReportMapComplete", &args, &EmptyArgs{})
+	if !ok {
+		fmt.Println("send map complete message failed")
+	}
+	return nil
+}
+
 
 func storeMapResult(kva []KeyValue, mapId int, reduceId int) {
 	oname := fmt.Sprintf("mr-%d-%d", mapId, reduceId)
