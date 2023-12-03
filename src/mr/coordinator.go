@@ -1,14 +1,41 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
+)
 
 
+const (
+	idle int = iota
+	working
+	loseConnection
+)
+type WorkerStatus struct {
+	lastHeartBeat time.Time
+	status int
+}
 type Coordinator struct {
 	// Your definitions here.
+
+
+	// worker status
+	worker_status map[string]WorkerStatus
+	// worker status lock
+	worker_status_lock sync.Mutex
+	// idle map task queue
+	// test implementation
+	test_queue []MrTask
+	// atimic variable for server done
+	done atomic.Bool
 
 }
 
@@ -24,6 +51,29 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+// RPC handler for worker to get task from coordinator
+func (c *Coordinator) GetTask(args *ExampleArgs, reply *TaskReply) error {
+	// pop a task from test_queue
+	if len(c.test_queue) > 0 {
+		reply.Task = c.test_queue[0]
+		c.test_queue = c.test_queue[1:]
+	} else {
+		reply.Task = MrTask{FilePath: "", MrType: -1}
+	}
+
+	return nil
+
+}
+
+func (c * Coordinator) RegisterWorker(args *RegisterArgs, reply *RegisterReply) error {
+	// register worker
+	reply.WorkerId = uuid.New().String()
+	c.worker_status_lock.Lock()
+	c.worker_status[reply.WorkerId] = WorkerStatus{lastHeartBeat: time.Now(), status: idle}
+	c.worker_status_lock.Unlock()
+	
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -64,7 +114,46 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// Your code here.
 
-
+	c.test_queue = make([]MrTask, 3)
+	c.test_queue[0] = MrTask{FilePath: "../test.txt", MrType: Map_t, MapId: 0, ReduceId: 0}
+	c.test_queue[1] = MrTask{FilePath: "../test.txt", MrType: Reduce_t, MapId: 0, ReduceId: 0}
+	c.test_queue[2] = MrTask{FilePath: "../test.txt", MrType: Stop_t, MapId: 0, ReduceId: 0}
 	c.server()
+	go c.healthCheck()
 	return &c
 }
+
+func (c *Coordinator) WorkerHeartBeat(args *HeartBeatArgs, reply *EmptyArgs) error {
+	// update worker status
+	c.worker_status_lock.Lock()
+	c.worker_status[args.WorkerId] = WorkerStatus{lastHeartBeat: time.Now(), status: args.Status}
+	c.worker_status_lock.Unlock()
+	return nil
+}
+
+func (c *Coordinator) healthCheck() {
+	// every 5 seconds, check if worker is still alive
+	// if not, set worker status to loseConnection
+	ticker := time.NewTicker(3 * time.Second)
+	for range ticker.C {	
+		c.worker_status_lock.Lock()	
+		for workerId, workerStatus := range c.worker_status {
+			// if haven't received heartbeat for 5 seconds, set status to loseConnection
+			if time.Now().Sub(workerStatus.lastHeartBeat) > 5 * time.Second {
+				// lose connection
+				c.worker_status[workerId] = WorkerStatus{lastHeartBeat: workerStatus.lastHeartBeat, status: loseConnection}
+			}
+			// if haven't received heartbeat for 10 seconds, delete worker
+			if time.Now().Sub(workerStatus.lastHeartBeat) > 10 * time.Second {
+				delete(c.worker_status, workerId)
+			}
+		}
+		c.worker_status_lock.Unlock()
+		
+		if hasDone := c.done.Load(); hasDone {
+			break
+		}
+	}
+
+}
+
