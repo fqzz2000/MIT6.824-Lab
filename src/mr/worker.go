@@ -70,30 +70,37 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	LOOP:
 	for {
-		task := getTask()
+		task := instance.getTask()
 		switch task.MrType {
 			case Map_t:
 				// do map
+				instance.status.Store(int32(working))
 				content := getFileContent(task.FilePath)
 				// call mapf
 				kva := mapf(task.FilePath, string(content))
-				// temporary implementation for testing
-				fmt.Printf("mapf result: %v\n", kva)
 				// write kva to intermediate file
-				// temporary implementation for testing
-				storeMapResult(kva, task.MapId, task.ReduceId)
-				instance.status.Store(int32(idle))
+				
+				fnames := storeMapResult(kva, task.MapId, task.NReduce)
 				// send map complete message to coordinator
-				ReportMapComplete(instance.workerId, task.MapId, task.FilePath)
+				instance.status.Store(int32(idle))
+				ReportMapComplete(instance.workerId, task.MapId, fnames)
+				
+
 			
 			case Reduce_t:
 				// do reduce
+				instance.status.Store(int32(working))
 				// call reducef
 				kva := readMapResult(task)
 				// sort kva by key
 				sort.Sort(ByKey(kva))
 				// call reducef
 				storeReduceResult(reducef, kva, task)
+				
+				// send reduce complete message to coordinator
+				instance.status.Store(int32(idle))
+				ReportReduceComplete(instance.workerId, task.ReduceId, task.FilePath)
+				
 				
 			case Stop_t:
 			// do stop
@@ -109,9 +116,9 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 // RPC handler for worker to send map complete message to coordinator
-func  ReportMapComplete(workerId string, mapid int, intermediaFilePath string) error {
+func  ReportMapComplete(workerId string, mapid int, intermediaFilePath []string) error {
 	
-	args := MapCompleteArgs{WorkerId: workerId, MapId: mapid, IFilePath: intermediaFilePath}
+	args := TaskCompleteArgs{WorkerId: workerId, Id: mapid, IFilePath: intermediaFilePath}
 	ok := call("Coordinator.ReportMapComplete", &args, &EmptyArgs{})
 	if !ok {
 		fmt.Println("send map complete message failed")
@@ -119,17 +126,36 @@ func  ReportMapComplete(workerId string, mapid int, intermediaFilePath string) e
 	return nil
 }
 
+// RPC handler for worker to send reduce complete message to coordinator
+func ReportReduceComplete(workerId string, reduceid int, intermediaFilePath []string) error {
+	args := TaskCompleteArgs{WorkerId: workerId, Id: reduceid, IFilePath: intermediaFilePath}
+	ok := call("Coordinator.ReportReduceComplete", &args, &EmptyArgs{})
+	if !ok {
+		fmt.Println("send reduce complete message failed")
+	}
+	return nil
+}
 
-func storeMapResult(kva []KeyValue, mapId int, reduceId int) {
-	oname := fmt.Sprintf("mr-%d-%d", mapId, reduceId)
-	ofile, _ := os.Create(oname)
-	enc := json.NewEncoder(ofile)
+// return intermediate file names
+func storeMapResult(kva []KeyValue, mapId int, nReduce int) []string{
+	// create intermediate file
+	rets := make([]string, 0)
+	encs := make([]*json.Encoder, nReduce)
+	for i := 0; i < nReduce; i++ {
+		oname := fmt.Sprintf("mr-%d-%d", mapId, i)
+		rets = append(rets, oname)
+		ofile, _ := os.Create(oname)
+		encs[i] = json.NewEncoder(ofile)
+	}
+	fmt.Printf("nReduce: %v\n", nReduce)
 	for _, kv := range kva {
+		enc := encs[ihash(kv.Key) % nReduce]
 		err := enc.Encode(&kv)
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
+	return rets
 }
 
 func readMapResult(task MrTask) []KeyValue {
@@ -222,8 +248,8 @@ func Register() string {
 }
 
 // RPC handler for worker to get task from coordinator
-func getTask() MrTask {
-	args := EmptyArgs{}
+func (w *workerInstance) getTask() MrTask {
+	args := TaskArgs{WorkerId: w.workerId}
 	reply := TaskReply{}
 	ok := call("Coordinator.GetTask", &args, &reply)
 	if ok {

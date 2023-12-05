@@ -33,18 +33,13 @@ type HeartBeatArgs struct {
 }
 
 // RPC arguments for worker to send map complete message to coordinator
-type MapCompleteArgs struct {
+type TaskCompleteArgs struct {
 	WorkerId string
-	MapId int
-	IFilePath string
+	Id int
+	IFilePath []string
 }
 
-// RPC arguments for worker to send reduce complete message to coordinator
-type ReduceCompleteArgs struct {
-	WorkerId string
-	ReduceId int
-	OFilePath string
-}
+
 
 type RegisterArgs struct {
 }
@@ -71,8 +66,11 @@ type MrTask struct {
 	MrType TaskType 
 	MapId int
 	ReduceId int
+	NReduce int
 }
-
+type TaskArgs struct {
+	WorkerId string
+}
 
 type TaskReply struct {
 	Task MrTask
