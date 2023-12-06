@@ -95,18 +95,22 @@ func Worker(mapf func(string, string) []KeyValue,
 				// sort kva by key
 				sort.Sort(ByKey(kva))
 				// call reducef
-				storeReduceResult(reducef, kva, task)
+				fnames := storeReduceResult(reducef, kva, task)
 				
 				// send reduce complete message to coordinator
 				instance.status.Store(int32(idle))
-				ReportReduceComplete(instance.workerId, task.ReduceId, task.FilePath)
+				ReportReduceComplete(instance.workerId, task.ReduceId, fnames)
 				
 				
 			case Stop_t:
 			// do stop
-				fmt.Println("stop")
 				break LOOP
+			case Empty_t:
+				// wait for task
+				time.Sleep(1 * time.Second)
+
 			default:
+				log.Fatal("unknown task type")
 			// do nothing
 			}
 		}
@@ -147,7 +151,6 @@ func storeMapResult(kva []KeyValue, mapId int, nReduce int) []string{
 		ofile, _ := os.Create(oname)
 		encs[i] = json.NewEncoder(ofile)
 	}
-	fmt.Printf("nReduce: %v\n", nReduce)
 	for _, kv := range kva {
 		enc := encs[ihash(kv.Key) % nReduce]
 		err := enc.Encode(&kv)
@@ -167,7 +170,6 @@ func readMapResult(task MrTask) []KeyValue {
 	}
 	pattern := regexp.MustCompile(`mr-\d+-` + strconv.Itoa(task.ReduceId))
 	for _, file := range files {
-		fmt.Println(file.Name())
 		if file.IsDir() {
 			continue
 		}
@@ -179,7 +181,7 @@ func readMapResult(task MrTask) []KeyValue {
 	return kva
 }
 
-func storeReduceResult(reducef func(string, []string) string , kva []KeyValue, task MrTask) {
+func storeReduceResult(reducef func(string, []string) string , kva []KeyValue, task MrTask) []string {
 	oname := fmt.Sprintf("mr-out-%d", task.ReduceId)
 	ofile, _ := os.Create(oname)
 	i := 0
@@ -198,6 +200,7 @@ func storeReduceResult(reducef func(string, []string) string , kva []KeyValue, t
 		i = j
 	}
 	ofile.Close()
+	return []string{oname}
 }
 
 
