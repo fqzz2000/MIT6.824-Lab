@@ -38,6 +38,7 @@ const (
 )
 
 type TaskStatus struct {
+	Task *MrTask
 	WorkerAssigned string
 	Status int
 	FilePath []string
@@ -112,7 +113,10 @@ func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
 
 	if mapStage == c.stage.Load() {
 		// if map stage, pop a task from idle_map_task_queue
-		if c.idle_map_task_queue.Len() > 0 {
+		c.idle_map_task_queue_lock.Lock()
+		len := c.idle_map_task_queue.Len()
+		c.idle_map_task_queue_lock.Unlock()
+		if len > 0 {
 			// pop a task from idle_map_task_queue
 			c.idle_map_task_queue_lock.Lock()
 			e := c.idle_map_task_queue.Front()
@@ -122,7 +126,7 @@ func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
 			c.idle_map_task_queue_lock.Unlock()
 			// update map task status
 			c.map_task_status_lock.Lock()
-			c.map_task_status[reply.Task.MapId] = TaskStatus{WorkerAssigned: args.WorkerId, Status: pending}
+			c.map_task_status[reply.Task.MapId] = TaskStatus{Task: &reply.Task, WorkerAssigned: args.WorkerId, Status: pending}
 			c.map_task_status_lock.Unlock()
 			// update worker status
 			c.updateWorkerStat(args.WorkerId, time.Now(), working)
@@ -132,7 +136,10 @@ func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
 		}
 	} else if reduceStage == c.stage.Load() {
 		// if reduce stage, pop a task from idle_reduce_task_queue
-		if c.idle_reduce_task_queue.Len() > 0 {
+		c.idle_reduce_task_queue_lock.Lock()
+		len := c.idle_reduce_task_queue.Len()
+		c.idle_reduce_task_queue_lock.Unlock()
+		if len > 0 {
 			// pop a task from idle_reduce_task_queue
 			c.idle_reduce_task_queue_lock.Lock()
 			e := c.idle_reduce_task_queue.Front()
@@ -142,7 +149,7 @@ func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
 			c.idle_reduce_task_queue_lock.Unlock()
 			// update reduce task status
 			c.reduce_task_status_lock.Lock()
-			c.reduce_task_status[reply.Task.ReduceId] = TaskStatus{WorkerAssigned: args.WorkerId, Status: pending}
+			c.reduce_task_status[reply.Task.ReduceId] = TaskStatus{Task: &reply.Task, WorkerAssigned: args.WorkerId, Status: pending}
 			c.reduce_task_status_lock.Unlock()
 			// update worker status
 			c.updateWorkerStat(args.WorkerId, time.Now(), working)
@@ -217,12 +224,14 @@ func (c *Coordinator) Done() bool {
 		ret = true
 	}
 	// wait for all workers to exit
+	c.worker_status_lock.Lock()
 	for _, workerStatus := range c.worker_status {
 		if workerStatus.status != exited {
 			ret = false
 			break
 		}
 	}
+	c.worker_status_lock.Unlock()
 	return ret
 }
 
@@ -247,8 +256,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.idle_reduce_task_queue = list.New()
 	// initialize map task queue
 	for i, file := range files {
-		c.idle_map_task_queue.PushBack(MrTask{FilePath: file, MrType: Map_t, MapId: i, ReduceId: i, NReduce: nReduce})
-		c.map_task_status[i] = TaskStatus{Status: unstarted}
+		task := MrTask{FilePath: file, MrType: Map_t, MapId: i, ReduceId: i, NReduce: nReduce}
+		c.idle_map_task_queue.PushBack(task)
+		c.map_task_status[i] = TaskStatus{Task: &task, Status: unstarted}
 	}
 	c.server()
 	go c.healthCheck()
@@ -276,13 +286,18 @@ func (c *Coordinator) healthCheck() {
 		c.worker_status_lock.Lock()	
 		for workerId, workerStatus := range c.worker_status {
 			// if haven't received heartbeat for 5 seconds, set status to loseConnection
-			if time.Now().Sub(workerStatus.lastHeartBeat) > 5 * time.Second {
+			if time.Now().Sub(workerStatus.lastHeartBeat) >= 5 * time.Second {
 				// lose connection
 				c.worker_status[workerId] = WorkerStatus{lastHeartBeat: workerStatus.lastHeartBeat, status: loseConnection}
 			}
 			// if haven't received heartbeat for 10 seconds, delete worker
-			if time.Now().Sub(workerStatus.lastHeartBeat) > 10 * time.Second {
+			// reschedule tasks assigned to this worker
+			// different with paper, for both map and reduce task, 
+			// we only reschedule the pending tasks assigned to this worker
+			// (In paper both completed and pending tasks are rescheduled as the intermediate files are written to worker's local disk)
+			if time.Now().Sub(workerStatus.lastHeartBeat) >= 10 * time.Second {
 				delete(c.worker_status, workerId)
+				c.rescheduleTask(workerId)
 			}
 		}
 		c.worker_status_lock.Unlock()
@@ -293,11 +308,48 @@ func (c *Coordinator) healthCheck() {
 	}
 }
 
+// reschedule task assigned to worker
+// we don't need to consider the case that there are a mix of map and reduce tasks assigned to a worker
+// because reduce tasks are assigned after all map tasks are completed
+func (c *Coordinator) rescheduleTask(workerId string) {
+	// if in map stage
+	if mapStage == c.stage.Load() {
+		// find the tasks assigned to this worker
+		c.map_task_status_lock.Lock()
+		for mapId, taskStatus := range c.map_task_status {
+			if taskStatus.WorkerAssigned == workerId {
+				// reschedule this task
+				c.idle_map_task_queue_lock.Lock()
+				c.idle_map_task_queue.PushBack(*c.map_task_status[mapId].Task)
+				c.idle_map_task_queue_lock.Unlock()
+				// update map task status
+				c.map_task_status[mapId] = TaskStatus{Task: c.map_task_status[mapId].Task, WorkerAssigned: "", Status: unstarted}
+			}
+		}
+		c.map_task_status_lock.Unlock()
+	} else if reduceStage == c.stage.Load() {
+		// find the tasks assigned to this worker
+		c.reduce_task_status_lock.Lock()
+		for reduceId, taskStatus := range c.reduce_task_status {
+			if taskStatus.WorkerAssigned == workerId {
+				// reschedule this task
+				c.idle_reduce_task_queue_lock.Lock()
+				c.idle_reduce_task_queue.PushBack(*c.reduce_task_status[reduceId].Task)
+				c.idle_reduce_task_queue_lock.Unlock()
+				// update reduce task status
+				c.reduce_task_status[reduceId] = TaskStatus{Task: c.reduce_task_status[reduceId].Task, WorkerAssigned: "", Status: unstarted}
+			}
+		}
+		c.reduce_task_status_lock.Unlock()
+	}
+	
+}
+
 // RPC handler for worker to send map complete message to coordinator
 func (c *Coordinator) ReportMapComplete(args *TaskCompleteArgs, reply *EmptyArgs) error {
 	c.map_task_status_lock.Lock()
-	c.map_task_status[args.Id] = TaskStatus{WorkerAssigned: args.WorkerId, Status: complete, FilePath: args.IFilePath}
-	c.map_task_status_lock.Unlock()
+	c.map_task_status[args.Id] = TaskStatus{Task: c.map_task_status[args.Id].Task, WorkerAssigned: args.WorkerId, Status: complete, FilePath: args.IFilePath}
+	
 	// update worker status
 	c.updateWorkerStat(args.WorkerId, time.Now(), idle)
 	// check if all map tasks are completed
@@ -308,6 +360,7 @@ func (c *Coordinator) ReportMapComplete(args *TaskCompleteArgs, reply *EmptyArgs
 			break
 		}
 	}
+	c.map_task_status_lock.Unlock()
 	if allMapTasksCompleted {
 		// TODO: can make it concurrent 
 		c.startReduceStage()
@@ -333,8 +386,8 @@ func (c *Coordinator) startReduceStage() {
 // RPC handler for worker to send reduce complete message to coordinator
 func (c *Coordinator) ReportReduceComplete(args *TaskCompleteArgs, reply *EmptyArgs) error {
 	c.reduce_task_status_lock.Lock()
-	c.reduce_task_status[args.Id] = TaskStatus{WorkerAssigned: args.WorkerId, Status: complete, FilePath: args.IFilePath}
-	c.reduce_task_status_lock.Unlock()
+	c.reduce_task_status[args.Id] = TaskStatus{Task: c.reduce_task_status[args.Id].Task, WorkerAssigned: args.WorkerId, Status: complete, FilePath: args.IFilePath}
+	
 	// update worker status
 	c.updateWorkerStat(args.WorkerId, time.Now(), idle)
 	// check if all reduce tasks are completed
@@ -345,6 +398,7 @@ func (c *Coordinator) ReportReduceComplete(args *TaskCompleteArgs, reply *EmptyA
 			break
 		}
 	}
+	c.reduce_task_status_lock.Unlock()
 	if allReduceTasksCompleted {
 		c.stage.Store(stopStage)
 	}
