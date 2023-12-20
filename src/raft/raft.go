@@ -104,8 +104,15 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
 	term = rf.currentTerm
 	isleader = rf.currentState.Load() == LEADER
+	rf.mu.Unlock()
+	// if isleader {
+	// 	DPrintf("[Server %d, Term %d] is leader", rf.me, rf.currentTerm)
+	// } else {
+	// 	DPrintf("[Server %d, Term %d] is not leader", rf.me, rf.currentTerm)
+	// }
 	return term, isleader
 }
 
@@ -262,7 +269,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if reply.Term != args.Term {
 		return ok
 	}
-	DPrintf("[Server %d, Term %d] receives vote from server %d", rf.me, rf.currentTerm, server)
+	// DPrintf("[Server %d, Term %d] receives vote from server %d", rf.me, rf.currentTerm, server)
 	if ok  {
 		rf.voteCh <- reply.VoteGranted
 	}
@@ -307,7 +314,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	DPrintf("Server %d receives heartbeat from server %d in term %d", rf.me, args.LeaderId, args.Term)
+	// DPrintf("Server %d receives heartbeat from server %d in term %d", rf.me, args.LeaderId, args.Term)
 	// currently no check for log consistency
 	// reset election timer
 	rf.resetElectionTimer()
@@ -320,7 +327,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if reply.Term != args.Term {
 		return ok
 	}
-	DPrintf("[Server %d, Term %d] receives heartbeat reply from server %d", rf.me, rf.currentTerm, server)
+	// DPrintf("[Server %d, Term %d] receives heartbeat reply from server %d", rf.me, rf.currentTerm, server)
 	return ok
 }
 
@@ -404,7 +411,7 @@ func (rf *Raft) election(startSign bool, sign *atomic.Bool) {
 
 } 
 func (rf *Raft) ticker() {
-	timeout := 300 + rand.Int63() % 300
+	timeout := 400 + rand.Int63() % 300
 	var cond atomic.Bool
 	for {
 		// if the server is not leader
@@ -417,18 +424,18 @@ func (rf *Raft) ticker() {
 				cond.Store(!sign)
 				// sign and cond are used to detect timeout
 				go rf.election(!sign, &cond)
-				timeout = 300 + rand.Int63() % 300
+				timeout = 400 + rand.Int63() % 300
 				rf.resetElectionTimer()
 			}
 
 			rf.mu.Unlock()
-			time.Sleep(time.Duration(50) * time.Millisecond)
+			time.Sleep(time.Duration(10) * time.Millisecond)
 			rf.mu.Lock()
-			rf.timeCount += 50
+			rf.timeCount += 10
 			rf.mu.Unlock()
 			
 		} else {
-			DPrintf("[server %d, term %d] is leader and wait", rf.me, rf.currentTerm)
+			// DPrintf("[server %d, term %d] is leader and wait", rf.me, rf.currentTerm)
 			<- rf.notLeaderCh
 		}
 	}
@@ -442,7 +449,7 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) resetElectionTimer() {
 	rf.timeCount = 0
-	DPrintf("[Server %d, Term %d] resets election timer", rf.me, rf.currentTerm)
+	// DPrintf("[Server %d, Term %d] resets election timer", rf.me, rf.currentTerm)
 }
 
 
@@ -452,7 +459,10 @@ func (rf *Raft) heartbeats() {
 	// temp implementation only send empty heartbeats
 	// send heartbeats to all peers regularly
 	for {
-		DPrintf("[Server %d, Term %d] sends heartbeat", rf.me, rf.currentTerm)
+		// DPrintf("[Server %d, Term %d] sends heartbeat", rf.me, rf.currentTerm)
+		if rf.currentState.Load() != LEADER {
+			return
+		}
 		rf.mu.Lock()
 		for i := 0; i < len(rf.peers); i++ {
 				
