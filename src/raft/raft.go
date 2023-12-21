@@ -85,8 +85,6 @@ type Raft struct {
 	nextIndex []int
 	matchIndex []int
 	// Channels
-	resetCh chan bool // channel to reset the election timer  only used by followers
-	voteCh chan RequestVoteReply // channel to count the votes only used by candidates
 	isLeaderCh chan int // channel to notify the ticker that the server becomes leader
 	notLeaderCh chan bool // channel to notify the ticker that the server is not leader
 	// condition variable to detect timeout
@@ -278,9 +276,26 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if reply.Term != args.Term {
 		return ok
 	}
+	rf.mu.Lock()
+	curTerm := rf.currentTerm
+	rf.mu.Unlock()
+	if curTerm != reply.Term {
+		return ok
+	}
 
 	if ok {
-		rf.voteCh <- *reply
+		rf.vcLock.Lock()
+		rf.totalCount++
+		if reply.VoteGranted {
+			rf.voteCount++
+		}
+		if rf.voteCount > len(rf.peers) / 2 && rf.currentState.Load() != LEADER {
+			// become leader
+			rf.currentState.Store(LEADER)
+			go rf.heartbeats()
+			rf.isLeaderCh <- 0
+		}
+		rf.vcLock.Unlock()
 	}
 	return ok
 }
@@ -386,55 +401,24 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
-func (rf *Raft) election(electionProc int) {
-	close(rf.voteCh)
+func (rf *Raft) election() {
+	rf.vcLock.Lock()
+	rf.voteCount = 1
+	rf.totalCount = 1
+	rf.vcLock.Unlock()
 	rf.mu.Lock()
-	rf.voteCh = make(chan RequestVoteReply)
 	rf.currentTerm++; 
 	rf.votedFor = rf.me
 	rf.currentState.Store(CANDIDATE)
 	// send RequestVote RPCs to all other servers
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
-			
 			args := RequestVoteArgs{rf.currentTerm, rf.me, -1, -1} // temp implementation
 			reply := RequestVoteReply{}
 			go rf.sendRequestVote(i, &args, &reply)
 		}
 	}
 	rf.mu.Unlock()
-	//count the votes
-	voteCount := 1
-	totalCount := 1
-	ch := rf.voteCh
-	for totalCount < len(rf.peers) {
-		rf.mu.Lock()
-		curTerm := rf.currentTerm
-		rf.mu.Unlock()
-		reply, ok := <- ch
-		if !ok {
-			DPrintf("[Server %d, Term %d] proc %d channel closed", rf.me, curTerm, electionProc)
-			return
-		}
-		DPrintf("[Server %d, Term %d] receives vote %v from [Server %d, Term %d], %d/%d/%d", rf.me, curTerm, reply.VoteGranted, reply.Server, reply.Term, voteCount, totalCount, len(rf.peers))
-		if reply.Term != curTerm {
-			continue
-		}
-
-		totalCount++
-		if reply.VoteGranted {
-			voteCount++
-		}
-		if voteCount > len(rf.peers) / 2 && rf.currentState.Load() != LEADER {
-			// become leader
-			rf.currentState.Store(LEADER)
-			go rf.heartbeats()
-			rf.isLeaderCh <- electionProc
-		}
-	
-	}
-
-
 } 
 
 func (rf *Raft) resetElectionTimer() {
@@ -449,25 +433,24 @@ func (rf *Raft) ticker() {
 	rf.mu.Lock()
 	rf.resetElectionTimer()
 	rf.mu.Unlock()
-	proc := 0
 	for {
 		if rf.currentState.Load() != LEADER {
 			select {
 			case <- rf.electionTimer.C:
 				// start election
 				rf.mu.Lock()
-				DPrintf("[Server %d, Term %d] starts election proc %d", rf.me, rf.currentTerm, proc)
+				DPrintf("[Server %d, Term %d] starts election", rf.me, rf.currentTerm)
 				rf.mu.Unlock()
 				// sign and cond are used to detect timeout
-				go rf.election(proc)
-				proc++
+				go rf.election()
+
 				rf.mu.Lock()
 				rf.resetElectionTimer()
 				rf.mu.Unlock()
 
-			case proc := <- rf.isLeaderCh:
+			case <- rf.isLeaderCh:
 				rf.mu.Lock()
-				DPrintf("[server %d, term %d] proc %d is leader and wait", rf.me, rf.currentTerm, proc)
+				DPrintf("[server %d, term %d]  is leader and wait", rf.me, rf.currentTerm)
 				rf.mu.Unlock()
 			}
 		} else {
@@ -529,10 +512,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.currentState.Store(FOLLOWER)
 	// Channels
-	rf.voteCh = make(chan RequestVoteReply)
 	rf.notLeaderCh = make(chan bool)
 	rf.isLeaderCh = make(chan int)
-
 	rf.electionTimer = time.NewTimer(time.Duration(400) * time.Millisecond)
 	rf.resetElectionTimer()
 	// initialize from state persisted before a crash
