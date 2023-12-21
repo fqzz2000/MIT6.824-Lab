@@ -93,6 +93,11 @@ type Raft struct {
 	timeCount int64
 	electionTimer *time.Timer 
 
+	// voteCount
+	voteCount int
+	totalCount int
+	vcLock sync.Mutex
+
 
 
 
@@ -381,10 +386,10 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
-func (rf *Raft) election(startSign bool, sign *atomic.Bool, electionProc int) {
+func (rf *Raft) election(electionProc int) {
 	close(rf.voteCh)
-	rf.voteCh = make(chan RequestVoteReply)
 	rf.mu.Lock()
+	rf.voteCh = make(chan RequestVoteReply)
 	rf.currentTerm++; 
 	rf.votedFor = rf.me
 	rf.currentState.Store(CANDIDATE)
@@ -401,19 +406,16 @@ func (rf *Raft) election(startSign bool, sign *atomic.Bool, electionProc int) {
 	//count the votes
 	voteCount := 1
 	totalCount := 1
+	ch := rf.voteCh
 	for totalCount < len(rf.peers) {
-		if startSign != sign.Load() {
-			DPrintf("[Server %d, Term %d] proc %d timeout election end", rf.me, rf.currentTerm, electionProc)
-			return
-		}
-		reply, ok := <- rf.voteCh
-		if !ok {
-			DPrintf("[Server %d, Term %d] proc %d channel closed", rf.me, rf.currentTerm, electionProc)
-			return
-		}
 		rf.mu.Lock()
 		curTerm := rf.currentTerm
 		rf.mu.Unlock()
+		reply, ok := <- ch
+		if !ok {
+			DPrintf("[Server %d, Term %d] proc %d channel closed", rf.me, curTerm, electionProc)
+			return
+		}
 		DPrintf("[Server %d, Term %d] receives vote %v from [Server %d, Term %d], %d/%d/%d", rf.me, curTerm, reply.VoteGranted, reply.Server, reply.Term, voteCount, totalCount, len(rf.peers))
 		if reply.Term != curTerm {
 			continue
@@ -434,48 +436,6 @@ func (rf *Raft) election(startSign bool, sign *atomic.Bool, electionProc int) {
 
 
 } 
-// func (rf *Raft) ticker() {
-// 	timeout := 400 + rand.Int63() % 300
-// 	var cond atomic.Bool
-// 	for {
-// 		// if the server is not leader
-// 		if rf.currentState.Load() != LEADER {
-// 			rf.mu.Lock()
-// 			if rf.timeCount >= timeout {
-// 				DPrintf("Server %d starts election", rf.me)
-// 				// start election
-// 				sign := cond.Load()
-// 				cond.Store(!sign)
-// 				// sign and cond are used to detect timeout
-// 				go rf.election(!sign, &cond)
-// 				timeout = 400 + rand.Int63() % 300
-// 				rf.resetElectionTimer()
-// 			}
-
-// 			rf.mu.Unlock()
-// 			time.Sleep(time.Duration(10) * time.Millisecond)
-// 			rf.mu.Lock()
-// 			rf.timeCount += 10
-// 			rf.mu.Unlock()
-			
-// 		} else {
-// 			// DPrintf("[server %d, term %d] is leader and wait", rf.me, rf.currentTerm)
-// 			<- rf.notLeaderCh
-// 		}
-// 	}
-	
-// 	// pause for a random amount of time between 400 and 700
-// 	// milliseconds.
-// 	// ms := 400 + (rand.Int63() % 300)
-// 	// time.Sleep(time.Duration(ms) * time.Millisecond)
-	
-// }
-
-
-// func (rf *Raft) resetElectionTimer() {
-// 	rf.timeCount = 0
-// 	// DPrintf("[Server %d, Term %d] resets election timer", rf.me, rf.currentTerm)
-// }
 
 func (rf *Raft) resetElectionTimer() {
 	// randomize the election timeout
@@ -489,8 +449,6 @@ func (rf *Raft) ticker() {
 	rf.mu.Lock()
 	rf.resetElectionTimer()
 	rf.mu.Unlock()
-	var cond atomic.Bool
-	cond.Store(false)
 	proc := 0
 	for {
 		if rf.currentState.Load() != LEADER {
@@ -500,10 +458,8 @@ func (rf *Raft) ticker() {
 				rf.mu.Lock()
 				DPrintf("[Server %d, Term %d] starts election proc %d", rf.me, rf.currentTerm, proc)
 				rf.mu.Unlock()
-				sign := cond.Load()
-				cond.Store(!sign)
 				// sign and cond are used to detect timeout
-				go rf.election(!sign, &cond, proc)
+				go rf.election(proc)
 				proc++
 				rf.mu.Lock()
 				rf.resetElectionTimer()
