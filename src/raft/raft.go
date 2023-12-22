@@ -206,7 +206,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		originalState := rf.currentState.Load()
 		rf.currentState.Store(FOLLOWER)
 		if originalState == LEADER {
-			rf.notLeaderCh <- true
+			// prevent send multiple times
+			select {
+			case rf.notLeaderCh <- true:
+			default:
+			}
 		}
 	}
 
@@ -279,9 +283,26 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	rf.mu.Lock()
 	curTerm := rf.currentTerm
 	rf.mu.Unlock()
-	if curTerm != reply.Term {
+	if curTerm != args.Term {
 		return ok
 	}
+	// if current term is smaller than reply term, update current term
+	rf.mu.Lock()
+	if rf.currentTerm < reply.Term {
+		rf.currentTerm = reply.Term
+		// become follower
+		originalState := rf.currentState.Load()
+		rf.currentState.Store(FOLLOWER)
+		if originalState == LEADER {
+			// prevent send multiple times
+			select {
+			case rf.notLeaderCh <- true:
+			default:
+			}
+		}
+		rf.votedFor = -1
+	}
+	rf.mu.Unlock()
 
 	if ok {
 		rf.vcLock.Lock()
@@ -330,7 +351,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		originalState := rf.currentState.Load()
 		rf.currentState.Store(FOLLOWER)
 		if originalState == LEADER {
-			rf.notLeaderCh <- true
+			// prevent send multiple times
+			select {
+			case rf.notLeaderCh <- true:
+			default:
+			}
 		}
 	}
 	reply.Term = rf.currentTerm
@@ -355,6 +380,23 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if curTerm != args.Term {
 		return ok
 	}
+	// if current term is smaller than reply term, update current term
+	rf.mu.Lock()
+	if rf.currentTerm < reply.Term {
+		rf.currentTerm = reply.Term
+		// become follower
+		originalState := rf.currentState.Load()
+		rf.currentState.Store(FOLLOWER)
+		if originalState == LEADER {
+			// prevent send multiple times
+			select {
+			case rf.notLeaderCh <- true:
+			default:
+			}
+		}
+		rf.votedFor = -1
+	}
+	rf.mu.Unlock()
 
 	// DPrintf("[Server %d, Term %d] receives heartbeat reply from server %d", rf.me, curTerm, server)
 	return ok
