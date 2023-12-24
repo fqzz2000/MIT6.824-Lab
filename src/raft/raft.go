@@ -315,6 +315,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if rf.voteCount > len(rf.peers) / 2 && rf.currentState.Load() != LEADER {
 			// become leader
 			rf.currentState.Store(LEADER)
+			// initialize nextIndex and matchIndex
+			for i := 0; i < len(rf.peers); i++ {
+				rf.nextIndex[i] = len(rf.log)
+				rf.matchIndex[i] = 0
+			}
 			go rf.heartbeats()
 			rf.isLeaderCh <- 0
 		}
@@ -360,7 +365,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
-
+	// reset election timer if the term is valid
+	rf.resetElectionTimer()
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	if (args.PrevLogIndex >= len(rf.log)) || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
@@ -368,8 +374,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	} 
-	// reset election timer
-	rf.resetElectionTimer()
+
 	// 3. If an existing entry conflicts with a new one (same index
 	// but different terms), delete the existing entry and all that
 	// follow it (§5.3)
@@ -403,11 +408,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for i := oldCommit + 1; i <= rf.commitIndex; i++ {
 			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
 			rf.applyCh <- applyMsg
+			DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, i)
 		}
 	}
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	// DPrintf("[Server %d, Term %d] Current Log: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.log, rf.commitIndex)
+	DPrintf("[Server %d, Term %d] Current Log: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.log, rf.commitIndex)
 	// DPrintf("Server %d receives heartbeat from server %d in term %d", rf.me, args.LeaderId, args.Term)
 	// currently no check for log consistency
 	return
@@ -415,7 +421,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	
 	DPrintf("[Server %d, Term %d] sends AppendEntries to server %d, args: %v", rf.me, rf.currentTerm, server, args)
+	DPrintf("[Server %d, Term %d] NextIndex: %v, MatchIndex: %v", rf.me, rf.currentTerm, rf.nextIndex, rf.matchIndex)
 	// DPrintf("[Server %d, Term %d] Current Log: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.log, rf.commitIndex)
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
@@ -451,6 +459,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Unlock()
 	// if success update the replica counting as well as matchIndex and nextIndex
 	if reply.Success {
+		DPrintf("[Server %d, Term %d] receives success AppendEntries from server %d", rf.me, rf.currentTerm, server)
 		rf.mu.Lock()
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
@@ -464,15 +473,18 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				rf.commitIndex = i
 				// send newly committed entries to applyCh
 				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+				DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, i)
 			} else {
 				break
 			}
 		}
+		DPrintf("[Server %d, Term %d] Current LogCount: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.logCount, rf.commitIndex)
 		rf.mu.Unlock()
 	} else {
 	// if not success, decrement nextIndex and retry
 		rf.mu.Lock()
 		rf.nextIndex[server]--
+		DPrintf("[Server %d, Term %d] receives failed AppendEntries from server %d, nextIndex: %v", rf.me, rf.currentTerm, server, rf.nextIndex)
 		rf.mu.Unlock()
 	}
 
@@ -512,15 +524,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.logCount = append(rf.logCount, 1)
 		rf.mu.Unlock()
 		// send AppendEntries RPCs to all other servers
-		for i := 0; i < len(rf.peers); i++ {
-			if i != rf.me {
-				rf.mu.Lock()
-				args := rf.makeAppendEntriesArgs(i) // temp implementation
-				rf.mu.Unlock()
-				reply := AppendEntriesReply{}
-				go rf.sendAppendEntries(i, &args, &reply)
-			}
-		}
+		// for i := 0; i < len(rf.peers); i++ {
+		// 	if i != rf.me {
+		// 		rf.mu.Lock()
+		// 		args := rf.makeAppendEntriesArgs(i) // temp implementation
+		// 		rf.mu.Unlock()
+		// 		reply := AppendEntriesReply{}
+		// 		go rf.sendAppendEntries(i, &args, &reply)
+		// 	}
+		// }
 		// collect results before apply
 	}
 	return index, term, isLeader
