@@ -694,6 +694,7 @@ func TestPersist12C(t *testing.T) {
 	cfg.begin("Test (2C): basic persistence")
 
 	cfg.one(11, servers, true)
+	DPrintf("SEND COMMAND 11\n")
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
@@ -705,6 +706,7 @@ func TestPersist12C(t *testing.T) {
 	}
 
 	cfg.one(12, servers, true)
+	DPrintf("SEND COMMAND 12\n")
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -712,10 +714,12 @@ func TestPersist12C(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(13, servers, true)
+	DPrintf("SEND COMMAND 13\n")
 
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 	cfg.one(14, servers-1, true)
+	DPrintf("SEND COMMAND 14\n")
 	cfg.start1(leader2, cfg.applier)
 	cfg.connect(leader2)
 
@@ -724,10 +728,12 @@ func TestPersist12C(t *testing.T) {
 	i3 := (cfg.checkOneLeader() + 1) % servers
 	cfg.disconnect(i3)
 	cfg.one(15, servers-1, true)
+	DPrintf("SEND COMMAND 15\n")
 	cfg.start1(i3, cfg.applier)
 	cfg.connect(i3)
 
 	cfg.one(16, servers, true)
+	DPrintf("SEND COMMAND 16\n")
 
 	cfg.end()
 }
@@ -824,15 +830,18 @@ func TestFigure82C(t *testing.T) {
 	cfg.begin("Test (2C): Figure 8")
 
 	cfg.one(rand.Int(), 1, true)
+	DPrintf("INIT AGREEMNT HOLD\n")
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
-				_, _, ok := cfg.rafts[i].Start(rand.Int())
+				command := rand.Int()
+				_, _, ok := cfg.rafts[i].Start(command)
 				if ok {
 					leader = i
+					DPrintf("SEND COMMAND %v TO %v\n", command, leader)
 				}
 			}
 		}
@@ -847,6 +856,7 @@ func TestFigure82C(t *testing.T) {
 
 		if leader != -1 {
 			cfg.crash1(leader)
+			DPrintf("CRASH %v\n", leader)
 			nup -= 1
 		}
 
@@ -867,7 +877,10 @@ func TestFigure82C(t *testing.T) {
 		}
 	}
 
-	cfg.one(rand.Int(), servers, true)
+	val := rand.Int()	
+	DPrintf("SEND COMMAND %v\n", val)
+	cfg.one(val, servers, true)
+
 
 	cfg.end()
 }
