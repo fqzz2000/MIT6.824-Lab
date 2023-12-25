@@ -337,15 +337,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 				rf.nextIndex[i] = len(rf.log)
 				rf.matchIndex[i] = 0
 			}
-			// initialize commitIndex
-			// all uncommitted entries from previous terms are committed
-			// send commited entries to applyCh
-			for i := rf.commitIndex + 1; i < len(rf.log); i++ {
-				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
-				DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, i)
-			}
+			// // initialize commitIndex
+			// // all uncommitted entries from previous terms are committed
+			// // send commited entries to applyCh
+			// for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+			// 	rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+			// 	DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, i)
+			// }
 
-			rf.commitIndex = len(rf.log) - 1
+			// rf.commitIndex = len(rf.log) - 1
 
 			go rf.heartbeats()
 			rf.isLeaderCh <- 0
@@ -499,12 +499,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.logCount[args.PrevLogIndex + i + 1]++
 		}
 		// update commitIndex
+		commitBegin := rf.commitIndex + 1
 		for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+			if rf.log[i].Term < rf.currentTerm {
+				continue
+			}
 			if rf.logCount[i] > len(rf.peers) / 2 {
+				// commit all uncommitted entries from previous terms
+				for j := commitBegin; j <= i; j++ {
+					rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[j].Command, CommandIndex: j}
+					DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, j)
+				}
 				rf.commitIndex = i
-				// send newly committed entries to applyCh
-				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
-				DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, i)
+				commitBegin = i + 1
 			} else {
 				break
 			}
