@@ -295,6 +295,10 @@ func (rf *Raft) isUpToDate(prevLogIndex int, prevLogTerm int) bool {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if !ok {
+		DPrintf("[Server %d, Term %d] fails to send RequestVote to server %d", rf.me, rf.currentTerm, server)
+		return ok
+	}
 	if reply.Term != args.Term {
 		return ok
 	}
@@ -337,16 +341,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 				rf.nextIndex[i] = len(rf.log)
 				rf.matchIndex[i] = 0
 			}
-			// // initialize commitIndex
-			// // all uncommitted entries from previous terms are committed
-			// // send commited entries to applyCh
-			// for i := rf.commitIndex + 1; i < len(rf.log); i++ {
-			// 	rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
-			// 	DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, i)
-			// }
-
-			// rf.commitIndex = len(rf.log) - 1
-
 			go rf.heartbeats()
 			rf.isLeaderCh <- 0
 		}
@@ -368,6 +362,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+	XTerm int
+	XIndex int
+	XLen int
 }
 
 // AppendEntries RPC handler.
@@ -375,6 +372,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 1. Reply false if term < currentTerm (§5.1)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.XTerm = -1
+	reply.XIndex = -1
+	reply.XLen = len(rf.log)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -398,6 +398,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	if (args.PrevLogIndex >= len(rf.log)) || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		if args.PrevLogIndex < len(rf.log) && args.PrevLogIndex >= 0 {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			// reply.XIndex is the first index of the term
+			for i := args.PrevLogIndex; i >= 0; i-- {
+				if rf.log[i].Term != reply.XTerm {
+					reply.XIndex = i + 1
+					break
+				}
+			}
+		}
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -419,6 +429,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 4. Append any new entries not already in the log
 	for i := 0; i < len(args.Entries); i++ {
 		if matchStart + i + 1 >= len(rf.log) {
+			// don't append duplicate entries
+			if (args.PrevLogIndex + i + 1 < len(rf.log)) && (rf.log[args.PrevLogIndex + i + 1].Term == args.Entries[i].Term) {
+				continue
+			}
 			rf.log = append(rf.log, args.Entries[i])
 			// logCount doesn't matter for followers as it is only used for leader
 			// it also doesn't matter even if the follower becomes leader later on as leader only commit entries from its term
@@ -458,6 +472,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok {
+		DPrintf("[Server %d, Term %d] fails to send AppendEntries to server %d", rf.me, rf.currentTerm, server)
 		return ok
 	}
 	if reply.Term != args.Term {
@@ -470,7 +485,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if curTerm != args.Term {
 		return ok
 	}
-	// if current term is smaller than reply term, update current term
+	// if current term is smaller than reply term, update current term and become follower
 	rf.mu.Lock()
 	if rf.currentTerm < reply.Term {
 		rf.currentTerm = reply.Term
@@ -486,6 +501,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			}
 		}
 		rf.votedFor = -1
+		rf.mu.Unlock()
+		return ok
 	}
 	rf.mu.Unlock()
 	// if success update the replica counting as well as matchIndex and nextIndex
@@ -519,10 +536,39 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		DPrintf("[Server %d, Term %d] Current LogCount: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.logCount, rf.commitIndex)
 		rf.mu.Unlock()
 	} else {
-	// if not success, decrement nextIndex and retry
+	// if not success update nextIndex
+	//  Case 1: leader doesn't have XTerm:
+	// nextIndex = XIndex
+	// Case 2: leader has XTerm:
+	// nextIndex = leader's last entry for XTerm
+	// Case 3: follower's log is too short:
+	// nextIndex = XLen
+
+		
 		rf.mu.Lock()
-		rf.nextIndex[server]--
-		DPrintf("[Server %d, Term %d] receives failed AppendEntries from server %d, nextIndex: %v", rf.me, rf.currentTerm, server, rf.nextIndex)
+		// Case 3
+		if reply.XLen > 0 && reply.XLen <= args.PrevLogIndex {
+			rf.nextIndex[server] = reply.XLen
+		} else if reply.XTerm > 0 {
+			// search for the last entry with XTerm
+			lastEntry := -1
+			for i := args.PrevLogIndex; i >= 0; i-- {
+				if rf.log[i].Term == reply.XTerm {
+					lastEntry = i
+					break
+				}
+			}
+			// Case 1
+			if lastEntry == -1 {
+				rf.nextIndex[server] = reply.XIndex
+			} else {
+				// Case 2
+				rf.nextIndex[server] = lastEntry
+			}
+		} else {
+			// decrease nextIndex by 1
+			rf.nextIndex[server]--
+		}
 		rf.mu.Unlock()
 	}
 
