@@ -75,7 +75,9 @@ type CommitApplier struct {
 	applyCh chan ApplyMsg
 	messageQueue []*ApplyMsg
 	mu sync.Mutex
+	killed atomic.Bool
 }
+
 
 func (ca *CommitApplier) apply(applymsg *ApplyMsg) {
 	ca.mu.Lock()
@@ -86,28 +88,24 @@ func (ca *CommitApplier) apply(applymsg *ApplyMsg) {
 func (ca *CommitApplier) applyLoop() {
 	for {
 		// apply entries every10ms 
-		time.Sleep(time.Duration(10) * time.Millisecond)
-		now := time.Now()
-		for time.Now().Sub(now) < time.Duration(5) * time.Millisecond  {
+		// time.Sleep(time.Duration(10) * time.Millisecond)
 			ca.mu.Lock()
 			if len(ca.messageQueue) > 0 {
 				applymsg := ca.messageQueue[0]
-				select {
-				case ca.applyCh <- *applymsg:
-					ca.messageQueue = ca.messageQueue[1:]
-				default:
-				
-				}
+				ca.mu.Unlock()
+				ca.applyCh <- *applymsg
+				ca.mu.Lock()
+				ca.messageQueue = ca.messageQueue[1:]
+
 			} 
 			ca.mu.Unlock()
-		}
-
 	}
 }
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	opMu	  sync.Mutex          // Lock to protect atomic operations
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -147,6 +145,7 @@ type Raft struct {
 
 	// for grading
 	commitApplier CommitApplier
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -457,13 +456,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 1. Reply false if term < currentTerm (§5.1)
 	// msg := fmt.Sprintf("[Server %d, Term %d] AppendEntries", rf.me, rf.currentTerm)
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	reply.XTerm = -1
 	reply.XIndex = -1
 	reply.XLen = len(rf.log) + rf.lastIncludedIndex
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		rf.mu.Unlock()
 		return 
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -478,6 +477,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			default:
 			}
 		}
+		rf.mu.Unlock()
 		return
 	}
 	// reset election timer if the term is valid
@@ -498,6 +498,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		rf.mu.Unlock()
 		return
 	} 
 
@@ -528,6 +529,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.persist()
 		}
 	}
+	commitedEntries := make([]ApplyMsg, 0)
+
 	if args.LeaderCommit > rf.commitIndex {
 		oldCommit := rf.commitIndex
 
@@ -540,7 +543,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for i := oldCommit + 1; i <= rf.commitIndex; i++ {
 			idx := i - rf.lastIncludedIndex
 			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[idx].Command, CommandIndex: i}
-			rf.commitApplier.apply(&applyMsg)
+			// rf.commitApplier.apply(&applyMsg)
+			// rf.applyCh <- applyMsg
+			commitedEntries = append(commitedEntries, applyMsg)
 			DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, i)
 		}
 	}
@@ -548,6 +553,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	DPrintf("[Server %d, Term %d] Current Log: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.log, rf.commitIndex)
 	// currently no check for log consistency
+	rf.mu.Unlock()
+	for _, applymsg := range commitedEntries {
+		rf.applyCh <- applymsg
+	}
 	return
 
 }
@@ -568,11 +577,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	// Leader Won't Commit Entries From Previous Terms
 	// msg := fmt.Sprintf("[Server %d, Term %d] sendAppendEntries", rf.me, rf.currentTerm)
 	rf.mu.Lock()
-	defer rf.mu.Unlock()	
-
-
-	
 	if rf.currentTerm != args.Term {
+		rf.mu.Unlock()	
 		return ok
 	}
 	// if current term is smaller than reply term, update current term and become follower
@@ -591,10 +597,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			}
 		}
 		rf.votedFor = -1
+		rf.mu.Unlock()	
 		return ok
 	}
 
 	// if success update the replica counting as well as matchIndex and nextIndex
+	commitedEntries := make([]ApplyMsg, 0)
 	if reply.Success {
 		DPrintf("[Server %d, Term %d] receives success AppendEntries from server %d", rf.me, rf.currentTerm, server)
 
@@ -621,8 +629,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				// commit all uncommitted entries from previous terms
 				for jdx := commitBegin; jdx <= idx; jdx++ {
 					j := jdx - rf.lastIncludedIndex
-					rf.commitApplier.apply(&ApplyMsg{CommandValid: true, Command: rf.log[j].Command, CommandIndex: jdx})
-					
+					// rf.commitApplier.apply(&ApplyMsg{CommandValid: true, Command: rf.log[j].Command, CommandIndex: jdx})
+					applymsg := ApplyMsg{CommandValid: true, Command: rf.log[j].Command, CommandIndex: jdx}
+					// rf.applyCh <- applymsg
+					commitedEntries = append(commitedEntries, applymsg)
 					DPrintf("[Server %d, Term %d] Committed entry %d", rf.me, rf.currentTerm, jdx)
 					// DPrintf("[Server %d, Term %d] jdx: %d, idx: %d", rf.me, rf.currentTerm, jdx, idx)
 				}
@@ -681,6 +691,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		DPrintf("[Server %d, Term %d] receives failed AppendEntries from server %d, nextIndex updated to: %v", rf.me, rf.currentTerm, server, rf.nextIndex)
 
 	}
+	rf.mu.Unlock()	
+	for _, applymsg := range commitedEntries {
+		rf.applyCh <- applymsg
+	}
 	return ok
 }
 
@@ -704,21 +718,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	// msg := fmt.Sprintf("[Server %d, Term %d] Start", rf.me, rf.currentTerm)
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	index = len(rf.log) + rf.lastIncludedIndex
 	isLeader = rf.currentState.Load() == LEADER
-	rf.mu.Unlock()
+
 	if isLeader {
 		// apply the command to log
 		// Entries will be sent through heartbeat
-
 		logItem := LogEntry{command, term, index}
-		rf.mu.Lock()
 		rf.lastApplied++
 		rf.log = append(rf.log, logItem)
 		rf.logCount = append(rf.logCount, 1)
 		rf.persist()
-		rf.mu.Unlock()
 	}
 	return index, term, isLeader
 }
@@ -885,11 +897,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logCount = make([]int, 0)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-
-	rf.log = append(rf.log, LogEntry{nil, 0, 0}) // dummy entry
+	rf.log = append(rf.log, LogEntry{nil, rf.lastIncludedTerm, rf.commitIndex}) // dummy entry
 	rf.logCount = append(rf.logCount, len(rf.peers)) // dummy entry
+
 	// snapshot
 	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
 
 	// need re-initialized after election
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -905,8 +918,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetElectionTimer()
 
 	// for grading
-	rf.commitApplier.applyCh = applyCh
-	rf.commitApplier.messageQueue = make([]*ApplyMsg, 0)
+	// rf.commitApplier.applyCh = applyCh
+	rf.applyCh = applyCh
+	// rf.commitApplier.messageQueue = make([]*ApplyMsg, 0)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	// re-initialize from snapshot
@@ -916,12 +930,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	rf.commitIndex = rf.lastIncludedIndex
 	rf.lastApplied = rf.lastIncludedIndex
+	
 
-	rf.log = append(rf.log, LogEntry{nil, rf.lastIncludedTerm, rf.commitIndex}) // dummy entry
-	rf.logCount = append(rf.logCount, len(rf.peers)) // dummy entry
 
 	// start ticker goroutine to start elections
-	go rf.commitApplier.applyLoop()
+	// go rf.commitApplier.applyLoop()
 	go rf.ticker()
 	return rf
 }
@@ -945,11 +958,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// if term < currentTerm, reply false
 	// if term > currentTerm, update currentTerm and become follower
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
 	DPrintf("[Server %d, Term %d] receives InstallSnapshot from server %d, args: %v", rf.me, rf.currentTerm, args.LeaderId, args)
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if args.Term < rf.currentTerm {
+		rf.mu.Unlock()
 		return 
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -967,6 +981,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		rf.mu.Unlock()
 		return
 	}
 	// need to reset election timer
@@ -981,7 +996,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	reply.Success = true
 	// apply to applier
 	applymsg := ApplyMsg{SnapshotValid: true, Snapshot: args.Snapshot, SnapshotTerm: rf.currentTerm, SnapshotIndex: rf.lastIncludedIndex}
-	rf.commitApplier.apply(&applymsg)
+	// rf.commitApplier.apply(&applymsg)
+	rf.mu.Unlock()
+	rf.applyCh <- applymsg
 	return 
 }
 
