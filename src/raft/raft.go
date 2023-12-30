@@ -904,9 +904,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetElectionTimer()
 
 	// for grading
-	// rf.commitApplier.applyCh = applyCh
 	rf.applyCh = applyCh
-	// rf.commitApplier.messageQueue = make([]*ApplyMsg, 0)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	// re-initialize from snapshot
@@ -920,7 +918,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 
 	// start ticker goroutine to start elections
-	// go rf.commitApplier.applyLoop()
 	go rf.ticker()
 	return rf
 }
