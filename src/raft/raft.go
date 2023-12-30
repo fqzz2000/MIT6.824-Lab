@@ -88,7 +88,6 @@ func (ca *CommitApplier) apply(applymsg *ApplyMsg) {
 func (ca *CommitApplier) applyLoop() {
 	for {
 		// apply entries every10ms 
-		// time.Sleep(time.Duration(10) * time.Millisecond)
 			ca.mu.Lock()
 			if len(ca.messageQueue) > 0 {
 				applymsg := ca.messageQueue[0]
@@ -155,7 +154,6 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-	// msg := fmt.Sprintf("[Server %d, Term %d] GetState", rf.me, rf.currentTerm)
 	rf.mu.Lock()
 	term = rf.currentTerm
 	isleader = rf.currentState.Load() == LEADER
@@ -172,8 +170,6 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-
 	raftstate := rf.encodeRaftState()
 	rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
 }
@@ -198,7 +194,6 @@ func (rf *Raft) readPersist(raftdata []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
 	r := bytes.NewBuffer(raftdata)
 	d := labgob.NewDecoder(r)
 
@@ -216,7 +211,6 @@ func (rf *Raft) readPersist(raftdata []byte) {
 	   d.Decode(&logCount) != nil ||
 	   d.Decode(&lastIncludedIndex) != nil ||
 	   d.Decode(&lastIncludedTerm) != nil{
-		//DPrintf("[Server %d, Term %d] fails to read persisted state", rf.me, rf.currentTerm)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -224,7 +218,6 @@ func (rf *Raft) readPersist(raftdata []byte) {
 		rf.logCount = logCount
 		rf.lastIncludedIndex = lastIncludedIndex
 		rf.lastIncludedTerm = lastIncludedTerm
-		//DPrintf("[Server %d, Term %d] reads persisted state [currentTerm: %d, votedFor: %d, log: %v, logCount: %v, lastIncludedIndex: %d]", rf.me, rf.currentTerm, rf.currentTerm, rf.votedFor, rf.log, rf.logCount, rf.lastIncludedIndex)
 	}
 }
 
@@ -236,7 +229,6 @@ func (rf *Raft) readPersist(raftdata []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	DPrintf("[Server %d, Term %d] Snapshot at index %d", rf.me, rf.currentTerm, index)
-	// msg := fmt.Sprintf("[Server %d, Term %d] Snapshot", rf.me, rf.currentTerm)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	term := rf.log[index - rf.lastIncludedIndex].Term
@@ -288,7 +280,6 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// 1. Reply false if term < currentTerm (§5.1)
-	// msg := fmt.Sprintf("[Server %d, Term %d] RequestVote", rf.me, rf.currentTerm)
 	rf.mu.Lock()
 	
 	defer rf.mu.Unlock()
@@ -870,8 +861,6 @@ func (rf *Raft) heartbeats() {
 
 		time.Sleep(time.Duration(120) * time.Millisecond)
 	}
-	//DPrintf("[Server %d, Term %d] is killed", rf.me, rf.currentTerm)
-	//DPrintf("[Server %d, Term %d](KILLED) Current Log: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.log, rf.commitIndex)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -907,9 +896,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// need re-initialized after election
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-
-	//DPrintf("[Server %d, Term %d] is initialized", rf.me, rf.currentTerm)
-	//DPrintf("rf.nextIndex: %v, rf:matchIndex: %v", rf.nextIndex, rf.matchIndex)
 	rf.currentState.Store(FOLLOWER)
 	// Channels
 	rf.notLeaderCh = make(chan bool)
@@ -996,7 +982,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	reply.Success = true
 	// apply to applier
 	applymsg := ApplyMsg{SnapshotValid: true, Snapshot: args.Snapshot, SnapshotTerm: rf.currentTerm, SnapshotIndex: rf.lastIncludedIndex}
-	// rf.commitApplier.apply(&applymsg)
 	rf.mu.Unlock()
 	rf.applyCh <- applymsg
 	return 
