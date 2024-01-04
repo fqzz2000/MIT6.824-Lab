@@ -6,6 +6,12 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 )
 
+const (
+	OpGet = iota
+	OpPut
+	OpAppend
+)
+
 type Err string
 
 // Put or Append

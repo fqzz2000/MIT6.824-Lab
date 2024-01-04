@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 	"bytes"
+	"fmt"
 	"math/rand"
 
 	// "sync"
@@ -814,6 +815,7 @@ func (rf *Raft) ticker() {
 			case <- rf.isLeaderCh:
 				rf.mu.Lock()
 				DPrintf("[server %d, term %d]  is leader and wait", rf.me, rf.currentTerm)
+				fmt.Printf("[server %d, term %d]  is leader and wait\n", rf.me, rf.currentTerm)
 				rf.mu.Unlock()
 			}
 		} else {
