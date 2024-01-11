@@ -12,6 +12,7 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	prevLeader int
 }
 
 func nrand() int64 {
@@ -25,6 +26,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.prevLeader = 0
 	return ck
 }
 
@@ -42,30 +44,26 @@ func (ck *Clerk) Get(key string) string {
 	DPrintf("[Client] Get(%v)\n", key)
 	// You will have to modify this function.
 	// retry with timeout
-	now := time.Now()
-	for time.Since(now) < 3 * time.Second {
+	for {
 		for i := 0; i < len(ck.servers); i++ {
 			args := GetArgs{Key: key}
 			reply := GetReply{}
-			if ok := ck.servers[i].Call("KVServer.Get", &args, &reply); !ok {
+			serverIdx := (i + ck.prevLeader) % len(ck.servers)
+			if ok := ck.servers[serverIdx].Call("KVServer.Get", &args, &reply); !ok {
 				// DPrintf("Get to server %v failed: no reply\n", i)
+				continue
+			}
+
+			if reply.Err == ErrNoKey {
+				time.Sleep(10 * time.Millisecond)
 				continue
 			}
 			if reply.Err == OK {
 				return reply.Value
 			}
-			if reply.Err == ErrWrongLeader {
-				// DPrintf("Get to server %v failed: wrong leader\n", i)
-				continue
-			}
-			if reply.Err == ErrNoKey {
-				DPrintf("[Client] Get(%v) ErrNoKey\n", key)
-				continue
-			}
+
 		}
 	}
-	DPrintf("[Client] Get(%v) timeout\n", key)
-	return ""
 }
 
 // shared by Put and Append.
@@ -77,20 +75,22 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	// TODO: need a cache to acce
 	// You will have to modify this function.
 	DPrintf("[Client] PutAppend(%v, %v, %v)\n", key, value, op)
 
 	// retry with timeout
-	now := time.Now()
-	for time.Since(now) < 3 * time.Second {
+	for {
 		for i := 0; i < len(ck.servers); i++ {
 			args := PutAppendArgs{Key: key, Value: value, Op: op}
 			reply := PutAppendReply{}
-			if ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply); !ok {
+			serverIdx := (i + ck.prevLeader) % len(ck.servers)
+			if ok := ck.servers[serverIdx].Call("KVServer.PutAppend", &args, &reply); !ok {
 				// DPrintf("PutAppend to server %v failed: no reply\n", i)
 				continue
 			}
 			if reply.Err == OK {
+				ck.prevLeader = serverIdx
 				return
 			}
 			if reply.Err == ErrWrongLeader {

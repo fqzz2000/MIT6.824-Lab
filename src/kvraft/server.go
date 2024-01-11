@@ -12,7 +12,7 @@ import (
 	"6.5840/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -52,7 +52,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 	
 	defer kv.mu.Unlock()
-	DPrintf("[Server %d] Get(%v) db = %v\n", kv.me, args, SPrintMap(kv.db))
+	// DPrintf("[Server %d] Get(%v) db = %v\n", kv.me, args, SPrintMap(kv.db))
 	if val, ok := kv.db[args.Key]; ok {
 		reply.Value = val
 		reply.Err = OK
@@ -81,32 +81,34 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	var op Op
 	if args.Op == "Put" {
 		op = Op{Opcode: OpPut, Key: args.Key, Value: args.Value}
-	} else {
+	} else if args.Op == "Append"{
 		op = Op{Opcode: OpAppend, Key: args.Key, Value: args.Value}
 	}
 	// 2. call raft.Start()
+	reply.Err = ErrWrongLeader
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		reply.Err = ErrWrongLeader
 		return
 	}
-	DPrintf("[Server %d] PutAppend(%v) is leader, index = %d\n", kv.me, args, index)
+	// DPrintf("[Server %d] PutAppend(%v) is leader, index = %d\n", kv.me, args, index)
 	// initialize cond
 	kv.mu.Lock()
 	ch := make(chan bool)
 	kv.condMap[index] = ch
-	DPrintf("[Server %d] PutAppend(%v) condMap[%d] initialized\n", kv.me, args, index)
+	// DPrintf("[Server %d] PutAppend(%v) condMap[%d] initialized\n", kv.me, args, index)
 	kv.mu.Unlock()
+	// 3. wait for raft to commit
 	<-ch
-	DPrintf("[Server %d] PutAppend(%v) condMap[%d] unblocked\n", kv.me, args, index)
+	// DPrintf("[Server %d] PutAppend(%v) condMap[%d] unblocked\n", kv.me, args, index)
 	close(ch)
 	// delete cond
 	kv.mu.Lock()
 	delete(kv.condMap, index)
 	kv.mu.Unlock()
-	// 3. wait for raft to commit
+
 	reply.Err = OK
 	// 4. return
+	DPrintf("[Server %d] PutAppend(%v) done, current db = %v\n", kv.me, args, SPrintMap(kv.db))
 	return 
 }
 
@@ -140,11 +142,11 @@ func (kv *KVServer) commitLoop() {
 			// wake up the goroutine
 			// DPrintf("[server %d] dereferencing msg index %d", kv.me, msg.CommandIndex)
 			if _, ok := kv.condMap[msg.CommandIndex]; !ok {
-				DPrintf("[server %d] Command Index %d Not Exist", kv.me, msg.CommandIndex)
+				// DPrintf("[server %d] Command Index %d Not Exist", kv.me, msg.CommandIndex)
 				kv.mu.Unlock()
 				continue
 			}
-			DPrintf("[Server %d]Unblocking Command Index %d", kv.me, msg.CommandIndex)
+			// DPrintf("[Server %d]Unblocking Command Index %d", kv.me, msg.CommandIndex)
 			kv.condMap[msg.CommandIndex] <- true
 			// update db
 			if op, ok := msg.Command.(Op); ok {

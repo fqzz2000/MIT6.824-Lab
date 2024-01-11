@@ -724,6 +724,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.logCount = append(rf.logCount, 1)
 		rf.persist()
 	}
+	rf.triggerAppendEntries()
 	return index, term, isLeader
 }
 
@@ -840,28 +841,32 @@ func (rf *Raft) heartbeats() {
 			return
 		}
 		// msg := fmt.Sprintf("[Server %d, Term %d] heartbeats", rf.me, rf.currentTerm)
-		for i := 0; i < len(rf.peers); i++ {
-			if i != rf.me {
-				rf.mu.Lock()
-				args, ok := rf.makeAppendEntriesArgs(i)
-				
-				rf.mu.Unlock()
-				if !ok {
-					// send snapshot
-					installArgs := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.persister.ReadSnapshot()}
-					installReply := InstallSnapshotReply{}
-					if len(installArgs.Snapshot) == 0  {
-						panic("Snapshot is nil")
-					}
-					go rf.sendInstallSnapshot(i, &installArgs, &installReply)
-				} else {
-					reply := AppendEntriesReply{}
-					go rf.sendAppendEntries(i, &args, &reply)
+		rf.triggerAppendEntries()
+		time.Sleep(time.Duration(120) * time.Millisecond)
+	}
+}
+
+func (rf *Raft) triggerAppendEntries() {
+	rf.opMu.Lock()
+	defer rf.opMu.Unlock()
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			rf.mu.Lock()
+			args, ok := rf.makeAppendEntriesArgs(i)
+			rf.mu.Unlock()
+			if !ok {
+				// send snapshot
+				installArgs := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.persister.ReadSnapshot()}
+				installReply := InstallSnapshotReply{}
+				if len(installArgs.Snapshot) == 0  {
+					panic("Snapshot is nil")
 				}
+				go rf.sendInstallSnapshot(i, &installArgs, &installReply)
+			} else {
+				reply := AppendEntriesReply{}
+				go rf.sendAppendEntries(i, &args, &reply)
 			}
 		}
-
-		time.Sleep(time.Duration(120) * time.Millisecond)
 	}
 }
 
