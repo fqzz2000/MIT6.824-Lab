@@ -14,8 +14,7 @@ import (
 	"6.5840/raft"
 )
 
-const Debug = true
-
+const Debug = false
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
 		log.Printf(format, a...)
@@ -49,11 +48,12 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
+	commitIndex atomic.Int32 // record the index of current committed log index in KVServer, used for restart
 	// Your definitions here.
-	condMap map[int]chan bool
+	condMap map[int]chan Err
 	db map[string]string
 	dupReq map[int64]int
-	dupCommit map[identity]bool
+	// dupCommit map[identity]bool
 }
 
 func SPrintMap(m map[string]string) string {
@@ -93,51 +93,27 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// GET is not duplicate
 	kv.mu.Lock()
 	DPrintf("[Server %d] PutAppend(%v) called, current db = %v\n", kv.me, args, SPrintMap(kv.db))
-	
-	if val, ok := kv.dupReq[args.ClerkId]; ok && args.Seq <= val && op.Opcode != OpGet{
-		kv.mu.Unlock()
-		reply.Err = ErrDupReq
-		return
-	}
-	oldSeq, hasOldSeq := kv.dupReq[args.ClerkId]
-	if op.Opcode != OpGet {
-		kv.dupReq[args.ClerkId] = args.Seq
-	} else {
-		if args.Seq > kv.dupReq[args.ClerkId] {
-			kv.dupReq[args.ClerkId] = args.Seq
-		}
-	} 
 	kv.mu.Unlock()
 	// DPrintf("[Server %d] PutAppend(%v) is leader, index = %d\n", kv.me, args, index)
 	// initialize cond
 	kv.mu.Lock()
-	ch := make(chan bool, 1)
+	ch := make(chan Err, 1)
 	kv.condMap[index] = ch
-	// DPrintf("[Server %d] PutAppend(%v) condMap[%d] initialized\n", kv.me, args, index)
+	DPrintf("[Server %d] PutAppend(%v) condMap[%d] initialized\n", kv.me, args, index)
 	kv.mu.Unlock()
 	// 3. wait for raft to commit
 	// we should not simply go ahead after the channel be created, it is possible that the given index was commited to the wrong value
 	// because the server may no longer the server when the unblock happens
 	// moreover it is possible that the server is no longer the leader thus it will never be unblocked
-	var res bool
+	var res Err
 	// If we failed to commit the log entry, simply ask the client to retry another server
 	select {
 		case <-time.After(time.Millisecond * 100):
 			DPrintf("[Server %d] PutAppend(%v) condMap[%d] timeout\n", kv.me, args, index)
-			// if timeout we should reset the dupReq
-			if !hasOldSeq && op.Opcode != OpGet {
-				kv.mu.Lock()
-				delete(kv.dupReq, args.ClerkId)
-				kv.mu.Unlock()
-			} else if hasOldSeq && op.Opcode != OpGet {
-				kv.mu.Lock()
-				kv.dupReq[args.ClerkId] = oldSeq
-				kv.mu.Unlock()
-			}
-			
-			res = false
+			res = ErrWrongLeader
 		case res = <-ch:
 	} 
+	// res = <- ch
 	// DPrintf("[Server %d] PutAppend(%v) condMap[%d] unblocked\n", kv.me, args, index)
 	
 	// delete cond
@@ -145,12 +121,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	delete(kv.condMap, index)
 	close(ch)
 	strdb := SPrintMap(kv.db)
-	
 	kv.mu.Unlock()
 	reply.Err = OK
-	if res == false {
+	if res == ErrWrongLeader {
 		reply.Err = ErrWrongLeader
 		return 
+	}
+	if res == ErrDupReq {
+		reply.Err = ErrDupReq
+		return
 	}
 	if args.Op == "Get" {
 		if val, ok := kv.db[args.Key]; !ok {
@@ -200,12 +179,15 @@ func (kv *KVServer) commitLoop() {
 			
 			if op, ok := msg.Command.(Op); ok {
 				// update db
-				id := identity{clerkId: op.ClerkId, seq: op.Seq}
-				if v, ok := kv.dupCommit[id]; ok && v {
+				if commitSeq, ok := kv.dupReq[op.ClerkId]; ok && op.Seq <= commitSeq   {
 					DPrintf("[Server %d] duplicate commit %d", kv.me, msg.CommandIndex)
-					
+					// need to check if there are PRC blocked at the index
+					if _, ok := kv.condMap[msg.CommandIndex]; ok && op.Opcode != OpGet {
+						kv.condMap[msg.CommandIndex] <- ErrDupReq
+						kv.mu.Unlock()
+						continue
+					}
 				} else {
-					kv.dupCommit[id] = true
 					// update clearkId
 					if op.Seq > kv.dupReq[op.ClerkId] {
 						kv.dupReq[op.ClerkId] = op.Seq
@@ -229,8 +211,11 @@ func (kv *KVServer) commitLoop() {
 				kv.mu.Unlock()
 				continue
 			}
-			_, isLeader := kv.rf.GetState()
-			kv.condMap[msg.CommandIndex] <- isLeader
+			if _, isLeader := kv.rf.GetState(); isLeader {
+				kv.condMap[msg.CommandIndex] <- OK
+			} else {
+				kv.condMap[msg.CommandIndex] <- ErrWrongLeader
+			}
 			
 			kv.mu.Unlock()
 		}
@@ -265,10 +250,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.condMap = make(map[int]chan bool)
+	kv.condMap = make(map[int]chan Err)
 	kv.db = make(map[string]string)
-	kv.dupCommit = make(map[identity]bool)
+	// kv.dupCommit = make(map[identity]bool)
 	kv.dupReq = make(map[int64]int)
+	kv.commitIndex.Store(1)
 
 	// You may need initialization code here.
 	go kv.commitLoop()
