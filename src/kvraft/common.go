@@ -4,6 +4,7 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrDupReq      = "ErrDupReq"
 )
 
 const (
@@ -22,10 +23,13 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Seq 	int
+	ClerkId int64
 }
 
 type PutAppendReply struct {
 	Err Err
+	Value string
 }
 
 type GetArgs struct {

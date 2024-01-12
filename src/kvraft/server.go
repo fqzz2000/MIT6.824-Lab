@@ -2,6 +2,8 @@ package kvraft
 
 import (
 	"log"
+	"time"
+
 	// "sync"
 	"sync/atomic"
 
@@ -29,6 +31,13 @@ type Op struct {
 	Opcode int
 	Key string
 	Value string
+	ClerkId int64
+	Seq int
+}
+
+type identity struct {
+	clerkId int64
+	seq int
 }
 
 type KVServer struct {
@@ -43,24 +52,8 @@ type KVServer struct {
 	// Your definitions here.
 	condMap map[int]chan bool
 	db map[string]string
-
-}
-
-
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-	kv.mu.Lock()
-	
-	defer kv.mu.Unlock()
-	// DPrintf("[Server %d] Get(%v) db = %v\n", kv.me, args, SPrintMap(kv.db))
-	if val, ok := kv.db[args.Key]; ok {
-		reply.Value = val
-		reply.Err = OK
-	} else {
-		reply.Value = ""
-		reply.Err = ErrNoKey
-	}
-	return 
+	dupReq map[int64]int
+	dupCommit map[identity]bool
 }
 
 func SPrintMap(m map[string]string) string {
@@ -77,38 +70,100 @@ func SPrintMap(m map[string]string) string {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+
 	// 1. create op
 	var op Op
 	if args.Op == "Put" {
-		op = Op{Opcode: OpPut, Key: args.Key, Value: args.Value}
+		op = Op{Opcode: OpPut, Key: args.Key, Value: args.Value, ClerkId: args.ClerkId, Seq: args.Seq}
 	} else if args.Op == "Append"{
-		op = Op{Opcode: OpAppend, Key: args.Key, Value: args.Value}
+		op = Op{Opcode: OpAppend, Key: args.Key, Value: args.Value, ClerkId: args.ClerkId, Seq: args.Seq}
+	} else if args.Op == "Get" {
+		op = Op{Opcode: OpGet, Key: args.Key, Value: "", ClerkId: args.ClerkId, Seq: args.Seq}
+	} else {
+		panic("Invalid Op")
 	}
 	// 2. call raft.Start()
 	reply.Err = ErrWrongLeader
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
+		DPrintf("[Server %d] PutAppend(%v) is not leader\n", kv.me, args)
 		return
 	}
+	// check duplicate
+	// GET is not duplicate
+	kv.mu.Lock()
+	DPrintf("[Server %d] PutAppend(%v) called, current db = %v\n", kv.me, args, SPrintMap(kv.db))
+	
+	if val, ok := kv.dupReq[args.ClerkId]; ok && args.Seq <= val && op.Opcode != OpGet{
+		kv.mu.Unlock()
+		reply.Err = ErrDupReq
+		return
+	}
+	oldSeq, hasOldSeq := kv.dupReq[args.ClerkId]
+	if op.Opcode != OpGet {
+		kv.dupReq[args.ClerkId] = args.Seq
+	} else {
+		if args.Seq > kv.dupReq[args.ClerkId] {
+			kv.dupReq[args.ClerkId] = args.Seq
+		}
+	} 
+	kv.mu.Unlock()
 	// DPrintf("[Server %d] PutAppend(%v) is leader, index = %d\n", kv.me, args, index)
 	// initialize cond
 	kv.mu.Lock()
-	ch := make(chan bool)
+	ch := make(chan bool, 1)
 	kv.condMap[index] = ch
 	// DPrintf("[Server %d] PutAppend(%v) condMap[%d] initialized\n", kv.me, args, index)
 	kv.mu.Unlock()
 	// 3. wait for raft to commit
-	<-ch
+	// we should not simply go ahead after the channel be created, it is possible that the given index was commited to the wrong value
+	// because the server may no longer the server when the unblock happens
+	// moreover it is possible that the server is no longer the leader thus it will never be unblocked
+	var res bool
+	// If we failed to commit the log entry, simply ask the client to retry another server
+	select {
+		case <-time.After(time.Millisecond * 100):
+			DPrintf("[Server %d] PutAppend(%v) condMap[%d] timeout\n", kv.me, args, index)
+			// if timeout we should reset the dupReq
+			if !hasOldSeq && op.Opcode != OpGet {
+				kv.mu.Lock()
+				delete(kv.dupReq, args.ClerkId)
+				kv.mu.Unlock()
+			} else if hasOldSeq && op.Opcode != OpGet {
+				kv.mu.Lock()
+				kv.dupReq[args.ClerkId] = oldSeq
+				kv.mu.Unlock()
+			}
+			
+			res = false
+		case res = <-ch:
+	} 
 	// DPrintf("[Server %d] PutAppend(%v) condMap[%d] unblocked\n", kv.me, args, index)
-	close(ch)
+	
 	// delete cond
 	kv.mu.Lock()
 	delete(kv.condMap, index)
+	close(ch)
+	strdb := SPrintMap(kv.db)
+	
 	kv.mu.Unlock()
-
 	reply.Err = OK
+	if res == false {
+		reply.Err = ErrWrongLeader
+		return 
+	}
+	if args.Op == "Get" {
+		if val, ok := kv.db[args.Key]; !ok {
+			reply.Value = ""
+			reply.Err = ErrNoKey
+		} else {
+			reply.Value = val
+			reply.Err = OK
+		}
+	}
+
 	// 4. return
-	DPrintf("[Server %d] PutAppend(%v) done, current db = %v\n", kv.me, args, SPrintMap(kv.db))
+	DPrintf("[Server %d] PutAppend(%v) done, reply err is (%v) current db = %v\n", kv.me, args, reply.Err, strdb)
 	return 
 }
 
@@ -140,27 +195,43 @@ func (kv *KVServer) commitLoop() {
 		if msg.CommandValid {
 			kv.mu.Lock()
 			// wake up the goroutine
+			DPrintf("[Server %d] receive msg %v current db %v", kv.me, msg, kv.db)
 			// DPrintf("[server %d] dereferencing msg index %d", kv.me, msg.CommandIndex)
+			
+			if op, ok := msg.Command.(Op); ok {
+				// update db
+				id := identity{clerkId: op.ClerkId, seq: op.Seq}
+				if v, ok := kv.dupCommit[id]; ok && v {
+					DPrintf("[Server %d] duplicate commit %d", kv.me, msg.CommandIndex)
+					
+				} else {
+					kv.dupCommit[id] = true
+					// update clearkId
+					if op.Seq > kv.dupReq[op.ClerkId] {
+						kv.dupReq[op.ClerkId] = op.Seq
+					}
+					if op.Opcode == OpAppend {
+						oldVal, ok := kv.db[op.Key]
+						if !ok {
+							kv.db[op.Key] = op.Value
+						} else {
+							kv.db[op.Key] = oldVal + op.Value
+						}
+					} else if op.Opcode == OpPut {
+						kv.db[op.Key] = op.Value	
+					}
+				}
+			}
+			// DPrintf("[Server %d]Unblocking Command Index %d", kv.me, msg.CommandIndex)
+					// check if current server is still leader
 			if _, ok := kv.condMap[msg.CommandIndex]; !ok {
-				// DPrintf("[server %d] Command Index %d Not Exist", kv.me, msg.CommandIndex)
+				DPrintf("[server %d] Command Index %d Not Exist", kv.me, msg.CommandIndex)
 				kv.mu.Unlock()
 				continue
 			}
-			// DPrintf("[Server %d]Unblocking Command Index %d", kv.me, msg.CommandIndex)
-			kv.condMap[msg.CommandIndex] <- true
-			// update db
-			if op, ok := msg.Command.(Op); ok {
-				if op.Opcode == OpAppend {
-					oldVal, ok := kv.db[op.Key]
-					if !ok {
-						kv.db[op.Key] = op.Value
-					} else {
-						kv.db[op.Key] = oldVal + op.Value
-					}
-				} else if op.Opcode == OpPut {
-					kv.db[op.Key] = op.Value	
-				}
-			}
+			_, isLeader := kv.rf.GetState()
+			kv.condMap[msg.CommandIndex] <- isLeader
+			
 			kv.mu.Unlock()
 		}
 
@@ -183,6 +254,7 @@ func (kv *KVServer) commitLoop() {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
+	DPrintf("[Server %d] StartKVServer called\n", me)
 	labgob.Register(Op{})
 
 	kv := new(KVServer)
@@ -195,6 +267,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.condMap = make(map[int]chan bool)
 	kv.db = make(map[string]string)
+	kv.dupCommit = make(map[identity]bool)
+	kv.dupReq = make(map[int64]int)
 
 	// You may need initialization code here.
 	go kv.commitLoop()
