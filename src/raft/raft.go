@@ -233,6 +233,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// DPrintf("[Server %d, Term %d] Snapshot at index %d", rf.me, rf.currentTerm, index)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if index <= rf.lastIncludedIndex {
+		return
+	}
 	term := rf.log[index - rf.lastIncludedIndex].Term
 	rf.snapshot(index, term, snapshot)
 	// DPrintf("[Server %d, Term %d]Snapshot Size: %d Snapshot: %v", rf.me, rf.currentTerm, rf.persister.SnapshotSize(), rf.persister.ReadSnapshot())
@@ -248,13 +251,14 @@ func (rf *Raft) snapshot(index int, term int, snapshot []byte) {
 	if index > rf.commitIndex {	
 		index = rf.commitIndex
 	}
+	DPrintf("[RAFT Server %d, Term %d] Snapshoting at index %d, current log len %v", rf.me, rf.currentTerm, index, len(rf.log))
 	rf.lastIncludedTerm = term
 	// // create a dummy entry
 	rf.log = append([]LogEntry{{nil, rf.lastIncludedTerm, index}}, rf.log[index+1-rf.lastIncludedIndex:]...)
 	rf.logCount = append([]int{len(rf.peers)}, rf.logCount[index+1-rf.lastIncludedIndex:]...)
 	// temp implementation
 	rf.lastIncludedIndex = index
-
+	DPrintf("[RAFT Server %d, Term %d] Snapshoted at index %d, current log len %v", rf.me, rf.currentTerm, index, len(rf.log))
 	rf.persister.Save(rf.encodeRaftState(), snapshot)
 }
 
@@ -478,6 +482,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	prevLogIndex := args.PrevLogIndex - rf.lastIncludedIndex
+	
+	if prevLogIndex < 0 {
+		rf.mu.Unlock()
+		return
+	}
+
 	if (prevLogIndex >= len(rf.log)) || (prevLogIndex >= 0 && rf.log[prevLogIndex].Term != args.PrevLogTerm) {
 		if prevLogIndex  < len(rf.log) && prevLogIndex >= 0 {
 			reply.XTerm = rf.log[prevLogIndex].Term
@@ -544,7 +554,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	DPrintf("[Server %d, Term %d] Current Log: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.log, rf.commitIndex)
+	// DPrintf("[Server %d, Term %d] Current Log: %v, current commitIndex %d", rf.me, rf.currentTerm, rf.log, rf.commitIndex)
 	// currently no check for log consistency
 	rf.mu.Unlock()
 	for _, applymsg := range commitedEntries {

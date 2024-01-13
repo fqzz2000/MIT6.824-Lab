@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"time"
 
@@ -54,6 +55,7 @@ type KVServer struct {
 	db map[string]string
 	dupReq map[int64]int
 	// dupCommit map[identity]bool
+	persister *raft.Persister
 }
 
 func SPrintMap(m map[string]string) string {
@@ -82,6 +84,16 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else {
 		panic("Invalid Op")
 	}
+
+	// taking snapshot if needed
+	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+		// DPrintf("[Server %d] Taking Snapshot, current size %v", kv.me, kv.persister.RaftStateSize())
+		kv.mu.Lock()
+		data := kv.saveSnapshot(int(kv.commitIndex.Load()))
+		kv.mu.Unlock()
+		kv.rf.Snapshot(int(kv.commitIndex.Load()), data)
+		DPrintf("[Server %d, commitIndex %v] Snapshot Taken, current size %v", kv.me, kv.commitIndex.Load(), kv.persister.RaftStateSize())
+	}
 	// 2. call raft.Start()
 	reply.Err = ErrWrongLeader
 	index, _, isLeader := kv.rf.Start(op)
@@ -94,7 +106,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	DPrintf("[Server %d] PutAppend(%v) called, current db = %v\n", kv.me, args, SPrintMap(kv.db))
 	kv.mu.Unlock()
-	// DPrintf("[Server %d] PutAppend(%v) is leader, index = %d\n", kv.me, args, index)
+	DPrintf("[Server %d] PutAppend(%v) is leader, index = %d\n", kv.me, args, index)
 	// initialize cond
 	kv.mu.Lock()
 	ch := make(chan Err, 1)
@@ -113,8 +125,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			res = ErrWrongLeader
 		case res = <-ch:
 	} 
-	// res = <- ch
-	// DPrintf("[Server %d] PutAppend(%v) condMap[%d] unblocked\n", kv.me, args, index)
 	
 	// delete cond
 	kv.mu.Lock()
@@ -171,6 +181,10 @@ func (kv *KVServer) commitLoop() {
 		if kv.killed() {
 			return 
 		}
+		if msg.SnapshotValid {
+			// load snapshot
+			kv.loadSnapshot(msg.Snapshot)
+		}
 		if msg.CommandValid {
 			kv.mu.Lock()
 			// wake up the goroutine
@@ -178,6 +192,9 @@ func (kv *KVServer) commitLoop() {
 			// DPrintf("[server %d] dereferencing msg index %d", kv.me, msg.CommandIndex)
 			
 			if op, ok := msg.Command.(Op); ok {
+				if msg.CommandIndex > int(kv.commitIndex.Load()) {
+					kv.commitIndex.Store(int32(msg.CommandIndex))
+				}
 				// update db
 				if commitSeq, ok := kv.dupReq[op.ClerkId]; ok && op.Seq <= commitSeq   {
 					DPrintf("[Server %d] duplicate commit %d", kv.me, msg.CommandIndex)
@@ -207,7 +224,7 @@ func (kv *KVServer) commitLoop() {
 			// DPrintf("[Server %d]Unblocking Command Index %d", kv.me, msg.CommandIndex)
 					// check if current server is still leader
 			if _, ok := kv.condMap[msg.CommandIndex]; !ok {
-				DPrintf("[server %d] Command Index %d Not Exist", kv.me, msg.CommandIndex)
+				// DPrintf("[server %d] Command Index %d Not Exist", kv.me, msg.CommandIndex)
 				kv.mu.Unlock()
 				continue
 			}
@@ -249,15 +266,48 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
 	kv.condMap = make(map[int]chan Err)
 	kv.db = make(map[string]string)
 	// kv.dupCommit = make(map[identity]bool)
 	kv.dupReq = make(map[int64]int)
 	kv.commitIndex.Store(1)
+	kv.persister = persister
+	kv.loadSnapshot(persister.ReadSnapshot())
+	DPrintf("[Server %d commitId %v] StartKVServer called, current db = %v\n", me, kv.commitIndex.Load(), SPrintMap(kv.db))
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	go kv.commitLoop()
 
+
 	return kv
+}
+
+func (kv *KVServer) loadSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var db map[string]string
+	var dupReq map[int64]int
+	var commitIndex int
+	if d.Decode(&db) != nil || d.Decode(&dupReq) != nil || d.Decode(&commitIndex) != nil {
+		panic("Error in decoding snapshot")
+	} else {
+		kv.db = db
+		kv.dupReq = dupReq
+		kv.commitIndex.Store(int32(commitIndex))
+	}
+}
+
+func (kv *KVServer) saveSnapshot(index int) []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.db)
+	e.Encode(kv.dupReq)
+	e.Encode(kv.commitIndex.Load())
+	data := w.Bytes()
+	return data
 }

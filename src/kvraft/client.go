@@ -59,11 +59,11 @@ func (ck *Clerk) Get(key string) string {
 			// 	DPrintf("[Client %v] Get to server %v failed: retry\n", ck.clerkId, serverIdx)
 			// }
 			if ok := ck.servers[serverIdx].Call("KVServer.PutAppend", &args, &reply); !ok {
-				DPrintf("[client %v seq %v] Get to server %v failed: retry\n", ck.clerkId, ck.seq,serverIdx)
+				// DPrintf("[client %v seq %v] Get to server %v failed: retry\n", ck.clerkId, ck.seq,serverIdx)
 				continue
 			}
 			if reply.Err == ErrWrongLeader {
-				DPrintf("[client %v seq %v] Get to server %v failed: wrong leader\n", ck.clerkId, ck.seq, serverIdx)
+				// DPrintf("[client %v seq %v] Get to server %v failed: wrong leader\n", ck.clerkId, ck.seq, serverIdx)
 				continue
 			}
 			if reply.Err == ErrNoKey {
@@ -73,11 +73,11 @@ func (ck *Clerk) Get(key string) string {
 			if reply.Err == OK {
 				ck.seq++
 				ck.curLeader = serverIdx
-				DPrintf("[client %v seq %v] Get to server %v success: key = %v;value = %v\n", ck.clerkId, ck.seq, serverIdx,args.Key, reply.Value)
+				// DPrintf("[client %v seq %v] Get to server %v success: key = %v;value = %v\n", ck.clerkId, ck.seq, serverIdx,args.Key, reply.Value)
 				return reply.Value
 			}
 			if reply.Err == ErrDupReq {
-				DPrintf("[client %v seq %v] Get to server %v failed: duplicate request\n", ck.clerkId, ck.seq, serverIdx)
+				// DPrintf("[client %v seq %v] Get to server %v failed: duplicate request\n", ck.clerkId, ck.seq, serverIdx)
 				ck.seq++
 				return ""
 			}
@@ -109,26 +109,26 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			// 	DPrintf("[Client %v] PutAppend to server %v failed: retry\n", ck.clerkId, i)
 			// }
 			if ok := ck.servers[serverIdx].Call("KVServer.PutAppend", &args, &reply); !ok {
-				DPrintf("[client %v seq %v] PutAppend to server %v failed: retry\n", ck.clerkId, ck.seq, serverIdx)
+				// DPrintf("[client %v seq %v] PutAppend to server %v failed: retry\n", ck.clerkId, ck.seq, serverIdx)
 				continue
 			}
 			if reply.Err == OK {
-				DPrintf("[client %v seq %v] PutAppend to server %v success OP: %v, Key=%v, Value %v\n", ck.clerkId, ck.seq, serverIdx, op, key, value)
+				// DPrintf("[client %v seq %v] PutAppend to server %v success OP: %v, Key=%v, Value %v\n", ck.clerkId, ck.seq, serverIdx, op, key, value)
 				ck.curLeader = serverIdx
 				ck.seq++
 				return
 			}
 			if reply.Err == ErrWrongLeader {
-				DPrintf("[client %v seq %v] PutAppend to server %v failed: wrong leader\n", ck.clerkId, ck.seq, serverIdx)
+				// DPrintf("[client %v seq %v] PutAppend to server %v failed: wrong leader\n", ck.clerkId, ck.seq, serverIdx)
 				continue
 			}	
 			if reply.Err == ErrDupReq {
-				DPrintf("[client %v seq %v]PutAppend to server %v failed: duplicate request\n", ck.clerkId, ck.seq, serverIdx)
+				// DPrintf("[client %v seq %v]PutAppend to server %v failed: duplicate request\n", ck.clerkId, ck.seq, serverIdx)
 				ck.seq++
 				return
 			}
 			if reply.Err == ErrNoKey {
-				DPrintf("[client %v seq %v]PutAppend to server %v failed: no key\n", ck.clerkId, ck.seq, serverIdx)
+				// DPrintf("[client %v seq %v]PutAppend to server %v failed: no key\n", ck.clerkId, ck.seq, serverIdx)
 				ck.seq++
 				return
 			}
