@@ -1,5 +1,7 @@
 package shardctrler
 
+import "sort"
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -28,11 +30,88 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (cg *Config) Copy() Config {
+	var newConfig Config
+	newConfig.Num = cg.Num
+	newConfig.Shards = cg.Shards
+	newConfig.Groups = make(map[int][]string)
+	for k, v := range cg.Groups {
+		newConfig.Groups[k] = v
+	}
+	return newConfig
+}
+
+func (cg *Config) AddGroup(gid int, servers []string) string {
+	if _, ok := cg.Groups[gid]; ok {
+		return ErrDuplicateGroup
+	}
+	cg.Groups[gid] = servers
+	return OK
+}
+
+func (cg *Config) RemoveGroup(gid int) string {
+	if _, ok := cg.Groups[gid]; !ok {
+		return ErrGroupNotExist
+	}
+	delete(cg.Groups, gid)
+	return OK
+}
+
+func (cg *Config) MoveShard(shard int, gid int) string {
+	if _, ok := cg.Groups[gid]; !ok {
+		return ErrGroupNotExist
+	}
+	cg.Shards[shard] = gid
+	return OK
+}
+
+func (cg *Config) Rebalance() {
+	// get all groups
+	groups := make([]int, 0)
+	for k, _ := range cg.Groups {
+		groups = append(groups, k)
+	}
+	// sort groups by gid in ascending order
+	sort.Ints(groups)
+	// assign groups to shards
+	for i := 0; i < NShards; i++ {
+		cg.Shards[i] = groups[i % len(groups)]
+	}
+}
+
+const (
+	OprJoin = "Join"
+	OprLeave = "Leave"
+	OprMove = "Move"
+	OprQuery = "Query"
+)
+
 const (
 	OK = "OK"
 )
 
 type Err string
+
+const (
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrDupReq = "ErrDuplicateRequest"
+	ErrTimeout = "ErrTimeout"
+	ErrGroupNotExist = "ErrGroupNotExist"
+	ErrDuplicateGroup = "ErrDuplicateGroup"
+)
+
+type GlobalArgs struct {
+	OpCode string
+	Args interface{}
+	ClerkId int64
+	Seq int
+}
+
+type GlobalReply struct {
+	WrongLeader bool
+	Err Err
+	Config Config
+}
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings

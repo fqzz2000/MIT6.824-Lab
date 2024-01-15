@@ -4,14 +4,19 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.5840/labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
+
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	ClerkId int64
+	Seq int
 }
 
 func nrand() int64 {
@@ -94,6 +99,23 @@ func (ck *Clerk) Move(shard int, gid int) {
 			ok := srv.Call("ShardCtrler.Move", args, &reply)
 			if ok && reply.WrongLeader == false {
 				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) Operate(op string, args interface{}) (Config, Err) {
+	clerkId := nrand()
+	seq := 0
+	for {
+		// try each known server.
+		for _, srv := range ck.servers {
+			var reply GlobalReply
+			ok := srv.Call("ShardCtrler.Operate", &GlobalArgs{OpCode: op, Args: args, ClerkId: clerkId, Seq: seq}, &reply)
+			if ok && reply.WrongLeader == false && reply.Err == OK {
+				DPrintf()
+				return reply.Config, reply.Err
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
