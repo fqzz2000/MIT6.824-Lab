@@ -54,7 +54,6 @@ type KVServer struct {
 	condMap map[int]chan Err
 	db map[string]string
 	dupReq map[int64]int
-	// dupCommit map[identity]bool
 	persister *raft.Persister
 }
 
@@ -269,7 +268,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.condMap = make(map[int]chan Err)
 	kv.db = make(map[string]string)
-	// kv.dupCommit = make(map[identity]bool)
 	kv.dupReq = make(map[int64]int)
 	kv.commitIndex.Store(1)
 	kv.persister = persister
