@@ -58,6 +58,8 @@ func check_same_config(t *testing.T, c1 Config, c2 Config) {
 		t.Fatalf("Num wrong")
 	}
 	if c1.Shards != c2.Shards {
+		DPrintf("c1.Shards: %v\n", c1.Shards)
+		DPrintf("c2.Shards: %v\n", c2.Shards)
 		t.Fatalf("Shards wrong")
 	}
 	if len(c1.Groups) != len(c2.Groups) {
@@ -88,14 +90,19 @@ func TestBasic(t *testing.T) {
 	fmt.Printf("Test: Basic leave/join ...\n")
 
 	cfa := make([]Config, 6)
+	DPrintf("Test FIRST QUERY")
 	cfa[0] = ck.Query(-1)
+	DPrintf("cfa[0]: %v\n", cfa[0])
 
 	check(t, []int{}, ck)
 
 	var gid1 int = 1
+	DPrintf("Test JOIN")
 	ck.Join(map[int][]string{gid1: []string{"x", "y", "z"}})
 	check(t, []int{gid1}, ck)
+	DPrintf("Test SECOND QUERY")
 	cfa[1] = ck.Query(-1)
+	DPrintf("cfa[1]: %v\n", cfa[1])
 
 	var gid2 int = 2
 	ck.Join(map[int][]string{gid2: []string{"a", "b", "c"}})
@@ -126,6 +133,7 @@ func TestBasic(t *testing.T) {
 	for s := 0; s < nservers; s++ {
 		cfg.ShutdownServer(s)
 		for i := 0; i < len(cfa); i++ {
+			DPrintf("Test: Historical queries ... Args: %v" , cfa[i].Num)
 			c := ck.Query(cfa[i].Num)
 			check_same_config(t, c, cfa[i])
 		}

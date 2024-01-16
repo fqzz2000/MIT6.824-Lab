@@ -1,6 +1,9 @@
 package shardctrler
 
-import "sort"
+import (
+	"log"
+	"sort"
+)
 
 //
 // Shard controler: assigns shards to replication groups.
@@ -21,6 +24,16 @@ import "sort"
 
 // The number of shards.
 const NShards = 10
+
+
+var Debug = false
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
@@ -68,8 +81,11 @@ func (cg *Config) MoveShard(shard int, gid int) string {
 func (cg *Config) Rebalance() {
 	// get all groups
 	groups := make([]int, 0)
-	for k, _ := range cg.Groups {
+	for k := range cg.Groups {
 		groups = append(groups, k)
+	}
+	if len(groups) == 0 {
+		return
 	}
 	// sort groups by gid in ascending order
 	sort.Ints(groups)
@@ -102,7 +118,10 @@ const (
 
 type GlobalArgs struct {
 	OpCode string
-	Args interface{}
+	QArgs QueryArgs
+	JArgs JoinArgs
+	LArgs LeaveArgs
+	MArgs MoveArgs
 	ClerkId int64
 	Seq int
 }

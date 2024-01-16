@@ -29,7 +29,10 @@ type ShardCtrler struct {
 type Op struct {
 	// Your data here.
 	OpCode string
-	Args interface{}
+	QArgs QueryArgs
+	JArgs JoinArgs
+	LArgs LeaveArgs
+	MArgs MoveArgs
 	ClerkId int64
 	Seq int
 }
@@ -39,32 +42,25 @@ type OpRes struct {
 	Config Config
 }
 
-
-func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
-	// Your code here.
-}
-
-func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
-	// Your code here.
-}
-
-func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
-	// Your code here.
-}
-
-func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
-	// Your code here.
-}
-
 func (sc *ShardCtrler) Operate(args *GlobalArgs, reply *GlobalReply) {
 	// Your code here.
-	op := Op{OpCode: args.OpCode, Args: args.Args, ClerkId: args.ClerkId, Seq: args.Seq}
+	DPrintf("[Server %d] receive request %v, current Configs %v", sc.me, args, sc.configs)
+	op := makeOp(args)
 	_, isLeader := sc.rf.GetState()
 	if !isLeader {
 		reply.WrongLeader = true
 		return
 	}
 	sc.mu.Lock()
+	if args.OpCode == OprQuery {
+		OpArgs := args.QArgs
+		if OpArgs.Num != -1 && OpArgs.Num < len(sc.configs) {
+			reply.Config = sc.configs[OpArgs.Num]
+			reply.Err = OK
+			sc.mu.Unlock()
+			return
+		}
+	}
 	index, _, _ := sc.rf.Start(op)
 	ch := make(chan Err, 1)
 	sc.condMap[index] = ch
@@ -84,11 +80,11 @@ func (sc *ShardCtrler) Operate(args *GlobalArgs, reply *GlobalReply) {
 		reply.WrongLeader = false
 	}
 	if args.OpCode == OprQuery {
-		OpArgs := args.Args.(QueryArgs)
+		OpArgs := args.QArgs
 		if OpArgs.Num == -1 || OpArgs.Num >= len(sc.configs) {
-			reply.config = sc.configs[len(sc.configs) - 1]
+			reply.Config = sc.configs[len(sc.configs) - 1]
 		} else {
-			reply.config = sc.configs[OpArgs.Num]
+			reply.Config = sc.configs[OpArgs.Num]
 		}
 	}
 	return 
@@ -134,12 +130,33 @@ func (sc *ShardCtrler) applyLoop() {
 	}
 }
 
+func makeOp(args *GlobalArgs) Op {
+	switch args.OpCode {
+	case OprJoin:
+		return Op{OpCode: args.OpCode, JArgs: args.JArgs, ClerkId: args.ClerkId, Seq: args.Seq}
+	case OprLeave:
+		return Op{OpCode: args.OpCode, LArgs: args.LArgs, ClerkId: args.ClerkId, Seq: args.Seq}
+	case OprMove:
+		return Op{OpCode: args.OpCode, MArgs: args.MArgs, ClerkId: args.ClerkId, Seq: args.Seq}
+	case OprQuery:
+		return Op{OpCode: args.OpCode, QArgs: args.QArgs, ClerkId: args.ClerkId, Seq: args.Seq}
+	}
+	panic("Invalid Op")
+}
+
 func (sc *ShardCtrler) apply(op Op) {
+	DPrintf("[Server %d] receive msg %v current config %v", sc.me, op, sc.configs)
 	switch op.OpCode {
 	case OprJoin:
-		joinargs := op.Args.(JoinArgs)
+		joinargs := op.JArgs
 		// create a new config
-		newConfig := sc.configs[len(sc.configs) - 1].Copy()
+		var newConfig Config
+		if len(sc.configs) == 0 {
+			newConfig = Config{}
+		} else {
+			newConfig = sc.configs[len(sc.configs) - 1].Copy()
+		}
+		newConfig.Num = len(sc.configs)
 		// add new group
 		for gid, servers := range joinargs.Servers {
 			if err := newConfig.AddGroup(gid, servers); err != OK {
@@ -148,10 +165,18 @@ func (sc *ShardCtrler) apply(op Op) {
 		}
 		// rebalance
 		newConfig.Rebalance()
+		// append new config
+		sc.configs = append(sc.configs, newConfig)
 	case OprLeave:
-		leaveargs := op.Args.(LeaveArgs)
+		leaveargs := op.LArgs
 		// create a new config
-		newConfig := sc.configs[len(sc.configs) - 1].Copy()
+		var newConfig Config
+		if len(sc.configs) == 0 {
+			newConfig = Config{}
+		} else {
+			newConfig = sc.configs[len(sc.configs) - 1].Copy()
+		}
+		newConfig.Num = len(sc.configs)
 		// remove group
 		for _, gid := range leaveargs.GIDs {
 			if err := newConfig.RemoveGroup(gid); err != OK {
@@ -160,14 +185,24 @@ func (sc *ShardCtrler) apply(op Op) {
 		}
 		// rebalance
 		newConfig.Rebalance()
+		// append new config
+		sc.configs = append(sc.configs, newConfig)
 	case OprMove:
-		moveargs := op.Args.(MoveArgs)
+		moveargs := op.MArgs
 		// create a new config
-		newConfig := sc.configs[len(sc.configs) - 1].Copy()
+		var newConfig Config
+		if len(sc.configs) == 0 {
+			newConfig = Config{}
+		} else {
+			newConfig = sc.configs[len(sc.configs) - 1].Copy()
+		}
+		newConfig.Num = len(sc.configs)
 		// move shard
 		if err := newConfig.MoveShard(moveargs.Shard, moveargs.GID); err != OK {
 			panic("Move Shard Failed: " + err)
 		}
+		// append new config
+		sc.configs = append(sc.configs, newConfig)
 	}
 }
 
@@ -205,6 +240,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
 
 	// Your code here.
+	sc.condMap = make(map[int]chan Err)
+	sc.dupReq = make(map[int64]int)
+	go sc.applyLoop()
 
 	return sc
 }
